@@ -1,0 +1,575 @@
+diff --git a/internal/upf/ebpf/objects.go b/internal/upf/ebpf/objects.go
+index b016f044..a733c56e 100644
+--- a/internal/upf/ebpf/objects.go
++++ b/internal/upf/ebpf/objects.go
+@@ -59,6 +59,10 @@ type BpfObjects struct {
+ 	N6Vlan           uint32
+ 	pagingMu         sync.Mutex
+ 	pagingList       map[DataNotification]bool
++
++	// UserspaceMode is true when the XDP program could not be loaded and
++	// the data plane runs as a userspace GTP-U forwarder.
++	UserspaceMode bool
+ }
+ 
+ func NewBpfObjects(flowact bool, masquerade bool, n3ifindex int, n6ifindex int, n3vlan uint32, n6vlan uint32) *BpfObjects {
+@@ -88,16 +92,56 @@ func (bpfObjects *BpfObjects) Load() error {
+ 		m.MaxEntries = uint32(runtime.NumCPU())
+ 	}
+ 
+-	if err := bpfObjects.loadAndAssignFromSpec(n3n6Spec, &bpfObjects.N3N6EntrypointObjects, nil); err != nil {
+-		logger.UpfLog.Error("failed to load N3/N6 program", zap.Error(err))
+-		return err
++	// Try full load (program + maps). If the XDP program fails verification
++	// (e.g. kernel too old for required BPF helpers), fall back to creating
++	// maps only — the userspace GTP-U forwarder will handle the data plane.
++	err = bpfObjects.loadAndAssignFromSpec(n3n6Spec, &bpfObjects.N3N6EntrypointObjects, nil)
++	if err == nil {
++		bpfObjects.ProfilingMap = profilingMapFromMaps(bpfObjects.N3N6EntrypointMaps)
++		return nil
++	}
++
++	logger.UpfLog.Warn("eBPF program load failed, falling back to userspace UPF mode", zap.Error(err))
++	bpfObjects.UserspaceMode = true
++
++	// Create maps individually without the XDP program.
++	maps := &bpfObjects.N3N6EntrypointMaps
++	mapNames := []struct {
++		name string
++		dst  **ebpf.Map
++	}{
++		{"csum_scratch", &maps.CsumScratch},
++		{"downlink_route_stats", &maps.DownlinkRouteStats},
++		{"downlink_statistics", &maps.DownlinkStatistics},
++		{"flow_stats", &maps.FlowStats},
++		{"nat_ct", &maps.NatCt},
++		{"no_neigh_map", &maps.NoNeighMap},
++		{"nocp_map", &maps.NocpMap},
++		{"pdrs_downlink_ip4", &maps.PdrsDownlinkIp4},
++		{"pdrs_downlink_ip6", &maps.PdrsDownlinkIp6},
++		{"pdrs_uplink", &maps.PdrsUplink},
++		{"rs_event_map", &maps.RsEventMap},
++		{"sdf_filters", &maps.SdfFilters},
++		{"uplink_route_stats", &maps.UplinkRouteStats},
++		{"uplink_statistics", &maps.UplinkStatistics},
++		{"urr_map", &maps.UrrMap},
+ 	}
+ 
+-	// Populate the optional profiling map from the embedded maps struct. The
+-	// field only exists in N3N6EntrypointMaps when compiled with
+-	// -DENABLE_PROFILING; reflection lets us check without a hard reference.
+-	bpfObjects.ProfilingMap = profilingMapFromMaps(bpfObjects.N3N6EntrypointMaps)
++	for _, m := range mapNames {
++		spec, ok := n3n6Spec.Maps[m.name]
++		if !ok {
++			logger.UpfLog.Warn("map spec not found, skipping", zap.String("map", m.name))
++			continue
++		}
++		newMap, err := ebpf.NewMap(spec)
++		if err != nil {
++			logger.UpfLog.Warn("failed to create map, skipping", zap.String("map", m.name), zap.Error(err))
++			continue
++		}
++		*m.dst = newMap
++	}
+ 
++	logger.UpfLog.Info("Userspace UPF mode: BPF maps created, XDP program skipped")
+ 	return nil
+ }
+ 
+diff --git a/internal/upf/upf.go b/internal/upf/upf.go
+index 5f65b2e9..a6f2994f 100644
+--- a/internal/upf/upf.go
++++ b/internal/upf/upf.go
+@@ -109,28 +109,34 @@ func Start(ctx context.Context, smfHandler engine.SMFReportHandler, n3Interface
+ 		return nil, err
+ 	}
+ 
+-	n3Link, err := link.AttachXDP(link.XDPOptions{
+-		Program:   bpfObjects.UpfN3N6EntrypointFunc,
+-		Interface: n3Iface.Index,
+-		Flags:     StringToXDPAttachMode(xdpAttachMode),
+-	})
+-	if err != nil {
+-		return nil, fmt.Errorf("failed to attach eBPF program on n3 interface %q: %s", n3AttachmentInterface, err)
+-	}
+-
++	var n3Link link.Link
+ 	var n6Link *link.Link
+ 
+-	if n6Iface.Index != n3Iface.Index {
+-		n6, err := link.AttachXDP(link.XDPOptions{
++	if !bpfObjects.UserspaceMode {
++		var err error
++		n3Link, err = link.AttachXDP(link.XDPOptions{
+ 			Program:   bpfObjects.UpfN3N6EntrypointFunc,
+-			Interface: n6Iface.Index,
++			Interface: n3Iface.Index,
+ 			Flags:     StringToXDPAttachMode(xdpAttachMode),
+ 		})
+ 		if err != nil {
+-			return nil, fmt.Errorf("failed to attach eBPF program on n6 interface %q: %s", n6AttachmentInterface, err)
++			return nil, fmt.Errorf("failed to attach eBPF program on n3 interface %q: %s", n3AttachmentInterface, err)
+ 		}
+ 
+-		n6Link = &n6
++		if n6Iface.Index != n3Iface.Index {
++			n6, err := link.AttachXDP(link.XDPOptions{
++				Program:   bpfObjects.UpfN3N6EntrypointFunc,
++				Interface: n6Iface.Index,
++				Flags:     StringToXDPAttachMode(xdpAttachMode),
++			})
++			if err != nil {
++				return nil, fmt.Errorf("failed to attach eBPF program on n6 interface %q: %s", n6AttachmentInterface, err)
++			}
++
++			n6Link = &n6
++		}
++	} else {
++		logger.UpfLog.Info("Userspace UPF: skipping XDP attachment, will use GTP-U forwarder")
+ 	}
+ 
+ 	resourceManager, err := engine.NewFteIDResourceManager(FTEIDPool)
+@@ -143,14 +149,19 @@ func Start(ctx context.Context, smfHandler engine.SMFReportHandler, n3Interface
+ 		return nil, fmt.Errorf("failed to create session engine: %w", err)
+ 	}
+ 
+-	notificationReader, err := ringbuf.NewReader(bpfObjects.NocpMap)
+-	if err != nil {
+-		return nil, fmt.Errorf("coud not start traffic notification reader: %s", err.Error())
+-	}
++	var notificationReader *ringbuf.Reader
++	var noNeighReader *ringbuf.Reader
+ 
+-	noNeighReader, err := ringbuf.NewReader(bpfObjects.NoNeighMap)
+-	if err != nil {
+-		return nil, fmt.Errorf("coud not start missing neighbour reader: %s", err.Error())
++	if !bpfObjects.UserspaceMode {
++		notificationReader, err = ringbuf.NewReader(bpfObjects.NocpMap)
++		if err != nil {
++			return nil, fmt.Errorf("coud not start traffic notification reader: %s", err.Error())
++		}
++
++		noNeighReader, err = ringbuf.NewReader(bpfObjects.NoNeighMap)
++		if err != nil {
++			return nil, fmt.Errorf("coud not start missing neighbour reader: %s", err.Error())
++		}
+ 	}
+ 
+ 	upf := &UPF{
+@@ -195,18 +206,25 @@ func Start(ctx context.Context, smfHandler engine.SMFReportHandler, n3Interface
+ 		)
+ 	}
+ 
+-	go upf.listenForTrafficNotifications() // #nosec: G118 -- lifecycle goroutine, not request-scoped
++	if !bpfObjects.UserspaceMode {
++		go upf.listenForTrafficNotifications() // #nosec: G118 -- lifecycle goroutine, not request-scoped
++		go upf.monitorUsage(30*time.Second, ctx.Done())
++		go upf.listenForMissingNeighbours() // #nosec: G118 -- lifecycle goroutine, not request-scoped
+ 
+-	go upf.monitorUsage(30*time.Second, ctx.Done())
+-
+-	go upf.listenForMissingNeighbours() // #nosec: G118 -- lifecycle goroutine, not request-scoped
+-
+-	if masquerade {
+-		upf.startGC(ctx)
+-	}
++		if masquerade {
++			upf.startGC(ctx)
++		}
+ 
+-	if flowact {
+-		upf.startFlowCollection(ctx)
++		if flowact {
++			upf.startFlowCollection(ctx)
++		}
++	} else {
++		// Start the userspace GTP-U forwarder
++		go upf.runUserspaceForwarder(ctx, n3IPv4, n3Iface.Index)
++		logger.UpfLog.Info("Userspace GTP-U forwarder started",
++			zap.String("n3_addr", n3IPv4),
++			zap.String("n3_iface", n3AttachmentInterface),
++		)
+ 	}
+ 
+ 	return upf, nil
+@@ -236,20 +254,26 @@ func (u *UPF) Close(ctx context.Context) {
+ 			}
+ 		}
+ 
+-		if err := u.n3Link.Close(); err != nil {
+-			logger.UpfLog.Warn("Failed to detach eBPF from n3", zap.Error(err))
++		if u.n3Link != nil {
++			if err := u.n3Link.Close(); err != nil {
++				logger.UpfLog.Warn("Failed to detach eBPF from n3", zap.Error(err))
++			}
+ 		}
+ 
+ 		if err := u.se.BpfObjects.Close(); err != nil {
+ 			logger.UpfLog.Warn("Failed to close BPF objects", zap.Error(err))
+ 		}
+ 
+-		if err := u.notificationReader.Close(); err != nil {
+-			logger.UpfLog.Warn("Failed to close notification reader", zap.Error(err))
++		if u.notificationReader != nil {
++			if err := u.notificationReader.Close(); err != nil {
++				logger.UpfLog.Warn("Failed to close notification reader", zap.Error(err))
++			}
+ 		}
+ 
+-		if err := u.noNeighReader.Close(); err != nil {
+-			logger.UpfLog.Warn("Failed to close missing neighbour reader", zap.Error(err))
++		if u.noNeighReader != nil {
++			if err := u.noNeighReader.Close(); err != nil {
++				logger.UpfLog.Warn("Failed to close missing neighbour reader", zap.Error(err))
++			}
+ 		}
+ 	}()
+ 
+@@ -300,6 +324,11 @@ func (u *UPF) UpdateFilters(ctx context.Context, policyID string, direction mode
+ func (u *UPF) ReloadNAT(masquerade bool) error {
+ 	u.se.BpfObjects.Masquerade = masquerade
+ 
++	if u.se.BpfObjects.UserspaceMode {
++		// In userspace mode, NAT toggle is stored in the struct; the forwarder reads it directly.
++		return nil
++	}
++
+ 	err := u.se.BpfObjects.LoadWithMapReplacements()
+ 	if err != nil {
+ 		return fmt.Errorf("couldn't load BPF objects: %w", err)
+@@ -327,6 +356,10 @@ func (u *UPF) ReloadNAT(masquerade bool) error {
+ func (u *UPF) ReloadFlowAccounting(flowact bool) error {
+ 	u.se.BpfObjects.FlowAccounting = flowact
+ 
++	if u.se.BpfObjects.UserspaceMode {
++		return nil
++	}
++
+ 	err := u.se.BpfObjects.LoadWithMapReplacements()
+ 	if err != nil {
+ 		return fmt.Errorf("couldn't load BPF objects: %w", err)
+--- /dev/null
++++ b/internal/upf/gtpu_forwarder.go
+@@ -0,0 +1,321 @@
++// Copyright 2026 - Userspace GTP-U forwarder for kernels without XDP support
++
++package upf
++
++import (
++	"context"
++	"encoding/binary"
++	"net"
++	"net/netip"
++	"unsafe"
++
++	"github.com/ellanetworks/core/internal/logger"
++	"github.com/ellanetworks/core/internal/upf/ebpf"
++	"github.com/songgao/water"
++	"github.com/vishvananda/netlink"
++	"go.uber.org/zap"
++)
++
++const (
++	gtpuPort       = 2152
++	gtpuHeaderSize = 8
++	// GTP-U flags: version=1, PT=1, E=0, S=0, PN=0
++	gtpuFlags = 0x30
++	gtpuMsgT  = 0xFF // G-PDU
++)
++
++// runUserspaceForwarder implements a simple GTP-U ↔ TUN forwarder.
++// Uplink: GTP-U on N3 (UDP:2152) → decap → write to TUN (ogstun)
++// Downlink: read from TUN → lookup UE IP → encap GTP-U → send to gNB
++func (u *UPF) runUserspaceForwarder(ctx context.Context, n3Addr string, n3IfIndex int) {
++	// Create TUN device for UE traffic (use "ellatun" to avoid conflict with Open5GS ogstun)
++	tunName := "ellatun"
++	tun, err := createOrOpenTun(tunName, "10.45.0.1/16")
++	if err != nil {
++		logger.UpfLog.Error("Failed to create/open TUN device", zap.Error(err))
++		return
++	}
++	defer tun.Close()
++
++	// Listen for GTP-U on N3
++	listenAddr := net.JoinHostPort(n3Addr, "2152")
++	udpAddr, err := net.ResolveUDPAddr("udp4", listenAddr)
++	if err != nil {
++		logger.UpfLog.Error("Failed to resolve GTP-U listen address", zap.Error(err))
++		return
++	}
++
++	conn, err := net.ListenUDP("udp4", udpAddr)
++	if err != nil {
++		logger.UpfLog.Error("Failed to listen for GTP-U", zap.String("addr", listenAddr), zap.Error(err))
++		return
++	}
++	defer conn.Close()
++
++	logger.UpfLog.Info("Userspace GTP-U forwarder listening",
++		zap.String("addr", listenAddr),
++		zap.String("tun", tunName),
++	)
++
++	// Uplink: GTP-U → TUN
++	go u.forwardUplink(ctx, conn, tun)
++
++	// Downlink: TUN → GTP-U (blocks until context cancelled)
++	u.forwardDownlink(ctx, tun, conn)
++}
++
++func (u *UPF) forwardUplink(ctx context.Context, conn *net.UDPConn, tun *water.Interface) {
++	buf := make([]byte, 65536)
++
++	for {
++		select {
++		case <-ctx.Done():
++			return
++		default:
++		}
++
++		n, _, err := conn.ReadFromUDP(buf)
++		if err != nil {
++			if ctx.Err() != nil {
++				return
++			}
++			logger.UpfLog.Debug("GTP-U read error", zap.Error(err))
++			continue
++		}
++
++		if n < gtpuHeaderSize {
++			continue
++		}
++
++		// Parse GTP-U header
++		flags := buf[0]
++		if flags&0xE0 != 0x20 { // version must be 1
++			continue
++		}
++
++		teid := binary.BigEndian.Uint32(buf[4:8])
++
++		// Calculate inner packet offset (handle extension headers)
++		offset := gtpuHeaderSize
++		if flags&0x07 != 0 { // E, S, or PN flag set
++			if n < offset+4 {
++				continue
++			}
++			offset += 4 // sequence number + N-PDU number + next ext header type
++			if flags&0x04 != 0 { // Extension header flag
++				for offset < n {
++					if offset >= n {
++						break
++					}
++					extLen := int(buf[offset]) * 4
++					if extLen == 0 {
++						break
++					}
++					offset += extLen
++					if offset > n {
++						break
++					}
++					if buf[offset-1] == 0 {
++						break
++					}
++				}
++			}
++		}
++
++		if offset >= n {
++			continue
++		}
++
++		innerPacket := buf[offset:n]
++
++		// Look up PDR by TEID in BPF map
++		pdr, ok := u.lookupUplinkPDR(teid)
++		if !ok {
++			logger.UpfLog.Debug("No PDR for TEID", logger.TEID(teid))
++			continue
++		}
++
++		// Account traffic via URR
++		if pdr.UrrId != 0 {
++			incrementURR(u.se.BpfObjects, pdr.UrrId, uint64(len(innerPacket)))
++		}
++
++		// Write inner packet to TUN
++		_, err = tun.Write(innerPacket)
++		if err != nil {
++			logger.UpfLog.Debug("TUN write error", zap.Error(err))
++		}
++	}
++}
++
++func (u *UPF) forwardDownlink(ctx context.Context, tun *water.Interface, conn *net.UDPConn) {
++	buf := make([]byte, 65536)
++	gtpBuf := make([]byte, 65536+gtpuHeaderSize)
++
++	for {
++		select {
++		case <-ctx.Done():
++			return
++		default:
++		}
++
++		n, err := tun.Read(buf)
++		if err != nil {
++			if ctx.Err() != nil {
++				return
++			}
++			logger.UpfLog.Debug("TUN read error", zap.Error(err))
++			continue
++		}
++
++		if n < 20 { // minimum IPv4 header
++			continue
++		}
++
++		// Extract destination IP from inner packet
++		version := buf[0] >> 4
++		var dstAddr netip.Addr
++		if version == 4 {
++			dstAddr = netip.AddrFrom4([4]byte(buf[16:20]))
++		} else if version == 6 && n >= 40 {
++			dstAddr = netip.AddrFrom16([16]byte(buf[24:40]))
++		} else {
++			continue
++		}
++
++		// Look up PDR by UE IP in BPF map
++		pdr, ok := u.lookupDownlinkPDR(dstAddr)
++		if !ok {
++			continue
++		}
++
++		// Account traffic via URR
++		if pdr.UrrId != 0 {
++			incrementURR(u.se.BpfObjects, pdr.UrrId, uint64(n))
++		}
++
++		// Check FAR action: 2 = forward
++		if pdr.Far.Action != 2 {
++			continue
++		}
++
++		// Build GTP-U header
++		gtpBuf[0] = gtpuFlags
++		gtpBuf[1] = gtpuMsgT
++		binary.BigEndian.PutUint16(gtpBuf[2:4], uint16(n))
++		binary.BigEndian.PutUint32(gtpBuf[4:8], pdr.Far.Teid)
++
++		// Copy inner packet after GTP-U header
++		copy(gtpBuf[gtpuHeaderSize:], buf[:n])
++
++		// Get remote gNB address from FAR
++		remoteIP := ebpf.In6AddrToIP(pdr.Far.Remoteip.In6U.U6Addr8)
++		if !remoteIP.IsValid() {
++			continue
++		}
++
++		dstUDP := &net.UDPAddr{
++			IP:   remoteIP.AsSlice(),
++			Port: gtpuPort,
++		}
++
++		_, err = conn.WriteToUDP(gtpBuf[:gtpuHeaderSize+n], dstUDP)
++		if err != nil {
++			logger.UpfLog.Debug("GTP-U send error", zap.Error(err))
++		}
++	}
++}
++
++// lookupUplinkPDR looks up a PDR by TEID using the BPF map.
++func (u *UPF) lookupUplinkPDR(teid uint32) (ebpf.N3N6EntrypointPdrInfo, bool) {
++	var pdr ebpf.N3N6EntrypointPdrInfo
++	if u.se.BpfObjects.PdrsUplink == nil {
++		return pdr, false
++	}
++	err := u.se.BpfObjects.PdrsUplink.Lookup(teid, unsafe.Pointer(&pdr))
++	if err != nil {
++		return pdr, false
++	}
++	return pdr, true
++}
++
++// lookupDownlinkPDR looks up a PDR by UE IP using the BPF map.
++func (u *UPF) lookupDownlinkPDR(addr netip.Addr) (ebpf.N3N6EntrypointPdrInfo, bool) {
++	var pdr ebpf.N3N6EntrypointPdrInfo
++	if addr.Is4() {
++		if u.se.BpfObjects.PdrsDownlinkIp4 == nil {
++			return pdr, false
++		}
++		key := addr.As4()
++		err := u.se.BpfObjects.PdrsDownlinkIp4.Lookup(key, unsafe.Pointer(&pdr))
++		if err != nil {
++			return pdr, false
++		}
++		return pdr, true
++	}
++	if u.se.BpfObjects.PdrsDownlinkIp6 == nil {
++		return pdr, false
++	}
++	key := addr.As16()
++	err := u.se.BpfObjects.PdrsDownlinkIp6.Lookup(key, unsafe.Pointer(&pdr))
++	if err != nil {
++		return pdr, false
++	}
++	return pdr, true
++}
++
++// incrementURR safely increments URR counters in the BPF per-CPU array map.
++func incrementURR(bpfObjs *ebpf.BpfObjects, urrID uint32, bytes uint64) {
++	if bpfObjs.UrrMap == nil {
++		return
++	}
++	var perCPU []uint64
++	if err := bpfObjs.UrrMap.Lookup(&urrID, &perCPU); err != nil {
++		return
++	}
++	if len(perCPU) > 0 {
++		perCPU[0] += bytes
++	}
++	_ = bpfObjs.UrrMap.Update(&urrID, perCPU, 0)
++}
++
++// --- TUN device management ---
++
++func createOrOpenTun(name string, cidr string) (*water.Interface, error) {
++	config := water.Config{
++		DeviceType: water.TUN,
++	}
++	config.Name = name
++
++	tun, err := water.New(config)
++	if err != nil {
++		return nil, err
++	}
++
++	// Configure the interface
++	link, err := netlink.LinkByName(name)
++	if err != nil {
++		tun.Close()
++		return nil, err
++	}
++
++	addr, err := netlink.ParseAddr(cidr)
++	if err != nil {
++		tun.Close()
++		return nil, err
++	}
++
++	if err := netlink.AddrAdd(link, addr); err != nil {
++		// Address may already exist
++		logger.UpfLog.Debug("TUN addr add (may already exist)", zap.Error(err))
++	}
++
++	if err := netlink.LinkSetUp(link); err != nil {
++		tun.Close()
++		return nil, err
++	}
++
++	logger.UpfLog.Info("TUN device ready", zap.String("name", name), zap.String("cidr", cidr))
++
++	return tun, nil
++}

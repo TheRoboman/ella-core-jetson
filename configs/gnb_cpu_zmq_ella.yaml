@@ -1,0 +1,53 @@
+# srsRAN Project gNodeB Configuration
+# CPU-only + ZMQ transport — connected to Ella Core (not Open5GS)
+# Band 3 FDD + 15 kHz SCS (required for srsUE SA compatibility)
+
+cu_cp:
+  amf:
+    addr: 10.3.0.2
+    port: 38412
+    bind_addr: 10.3.0.1
+    supported_tracking_areas:
+      - tac: 1
+        plmn_list:
+          - plmn: "00101"
+            tai_slice_support_list:
+              - sst: 1
+
+ru_sdr:
+  device_driver: zmq
+  device_args: tx_port=tcp://127.0.0.1:2000,rx_port=tcp://127.0.0.1:2001,base_srate=11.52e6
+  srate: 11.52
+  tx_gain: 80
+  rx_gain: 40
+
+cell_cfg:
+  dl_arfcn: 368500
+  band: 3
+  channel_bandwidth_MHz: 10
+  common_scs: 15
+  plmn: "00101"
+  tac: 1
+  pci: 1
+  pdcch:
+    dedicated:
+      ss2_type: common
+      dci_format_0_1_and_1_1: false
+    common:
+      ss0_index: 0
+      coreset0_index: 6
+  prach:
+    prach_config_index: 1
+  pdsch:
+    mcs_table: qam64
+  pusch:
+    mcs_table: qam64
+
+log:
+  filename: /tmp/gnb_ella_zmq.log
+  all_level: info
+
+pcap:
+  mac_enable: false
+  ngap_enable: true
+  ngap_filename: /tmp/gnb_ella_ngap.pcap

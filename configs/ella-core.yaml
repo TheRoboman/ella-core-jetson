@@ -1,0 +1,26 @@
+logging:
+  system:
+    level: "debug"
+    output: "stdout"
+  audit:
+    output: "stdout"
+db:
+  path: "/home/rapidbeam/ella-core-trial/data/ella.db"
+interfaces:
+  n2:
+    address: "10.3.0.2"
+    port: 38412
+  n3:
+    name: "ella-n3"
+  n6:
+    name: "ella-n6"
+  api:
+    address: "0.0.0.0"
+    port: 5002
+    tls:
+      cert: "/var/snap/ella-core/common/cert.pem"
+      key: "/var/snap/ella-core/common/key.pem"
+xdp:
+  attach-mode: "generic"
+telemetry:
+  enabled: false
