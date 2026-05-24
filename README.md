@@ -13,7 +13,9 @@ ella-core-jetson/
 ├── README.md                          # This file
 ├── docs/
 │   ├── ARCHITECTURE.md                # How the userspace UPF works
-│   └── TEST_RESULTS.md                # Full E2E test validation
+│   ├── TEST_RESULTS.md                # Full E2E test validation
+│   └── ADRV9361_DEPLOYMENT.md         # Building a stripped Debian SD card
+│                                      #   for ADRV9361-Z7035 (Zynq-7035)
 ├── configs/
 │   ├── ella-core.yaml                 # Ella Core config (N2/N3/N6 interfaces)
 │   ├── gnb_cpu_zmq_ella.yaml          # srsRAN gNB → Ella Core (ZMQ)
@@ -22,12 +24,23 @@ ella-core-jetson/
 │   ├── ueransim_gnb_ella.yaml         # UERANSIM gNB → Ella Core
 │   └── ueransim_ue_ella.yaml          # UERANSIM UE (NAS-level test)
 ├── scripts/
-│   ├── setup-ella-net.sh              # Create veth/dummy interfaces
-│   └── start-ella-core.sh             # Start the patched binary
+│   ├── setup-ella-net.sh              # Create veth/dummy interfaces (Jetson)
+│   └── start-ella-core.sh             # Start the patched binary (Jetson)
+├── sd-card/                           # ADRV9361-Z7035 deployment
+│   ├── cross-compile.sh               # Build Ella Core for armv7
+│   └── build-sd-card.sh               # Build minimal Debian SD card
 └── patches/
-    ├── userspace-upf.patch            # Git patch against ellanetworks/core v1.10.2
+    ├── userspace-upf-and-armv7.patch  # Git patch against ellanetworks/core v1.10.2
+    │                                  #   (userspace UPF + armv7 32-bit fixes)
     └── gtpu_forwarder.go              # New file: userspace GTP-U forwarder
 ```
+
+## Deployment Targets
+
+| Target | Status | Doc |
+|--------|--------|-----|
+| Jetson AGX Orin (aarch64, kernel 5.15) | ✅ Validated | This README |
+| ADRV9361-Z7035 (armv7, Cortex-A9) | 🚧 SD card built, awaiting boot | [ADRV9361_DEPLOYMENT.md](docs/ADRV9361_DEPLOYMENT.md) |
 
 ## Quick Start
 

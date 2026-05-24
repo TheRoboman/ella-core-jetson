@@ -1,3 +1,53 @@
+diff --git a/internal/api/server/api_bgp.go b/internal/api/server/api_bgp.go
+index 593b200d..b8d30656 100644
+--- a/internal/api/server/api_bgp.go
++++ b/internal/api/server/api_bgp.go
+@@ -150,7 +150,7 @@ func UpdateBGPSettings(dbInstance *db.Database, bgpService *bgp.BGPService) http
+ 			return
+ 		}
+ 
+-		if params.LocalAS < 1 || params.LocalAS > 4294967295 {
++		if params.LocalAS < 1 || int64(params.LocalAS) > 4294967295 {
+ 			writeError(r.Context(), w, http.StatusBadRequest, "localAS must be between 1 and 4294967295", nil, logger.APILog)
+ 			return
+ 		}
+@@ -317,7 +317,7 @@ func validatePeerParams(address string, remoteAS int, holdTime *int, importPrefi
+ 		return fmt.Errorf("address is not valid")
+ 	}
+ 
+-	if remoteAS < 1 || remoteAS > 4294967295 {
++	if remoteAS < 1 || int64(remoteAS) > 4294967295 {
+ 		return fmt.Errorf("remoteAS must be between 1 and 4294967295")
+ 	}
+ 
+diff --git a/internal/db/metrics.go b/internal/db/metrics.go
+index 8b0f9dd4..46e48519 100644
+--- a/internal/db/metrics.go
++++ b/internal/db/metrics.go
+@@ -122,7 +122,9 @@ func (db *Database) GetIPAddressesTotal() (int, error) {
+ func countIPsInPrefix(prefix netip.Prefix) int {
+ 	bits := prefix.Bits()
+ 	if 32-bits > 30 {
+-		return int(^uint32(0))
++		// On 32-bit platforms, int max is 2^31-1, so clamp to that.
++		// On 64-bit platforms, this is still a sensible "very large" value.
++		return int(^uint32(0) >> 1)
+ 	}
+ 
+ 	return 1 << (32 - bits)
+diff --git a/internal/db/restore.go b/internal/db/restore.go
+index 9d834f63..7d107e33 100644
+--- a/internal/db/restore.go
++++ b/internal/db/restore.go
+@@ -94,7 +94,7 @@ func extractBackupArchive(r io.Reader, destDir string) error {
+ 		}
+ 
+ 		if totalExtracted+hdr.Size > maxBackupTotalSize {
+-			return fmt.Errorf("tar entry %q would exceed total extracted budget of %d bytes", hdr.Name, maxBackupTotalSize)
++			return fmt.Errorf("tar entry %q would exceed total extracted budget of %d bytes", hdr.Name, int64(maxBackupTotalSize))
+ 		}
+ 
+ 		totalExtracted += hdr.Size
 diff --git a/internal/upf/ebpf/objects.go b/internal/upf/ebpf/objects.go
 index b016f044..a733c56e 100644
 --- a/internal/upf/ebpf/objects.go
@@ -78,7 +128,7 @@ index b016f044..a733c56e 100644
  }
  
 diff --git a/internal/upf/upf.go b/internal/upf/upf.go
-index 5f65b2e9..a6f2994f 100644
+index 5f65b2e9..881bb339 100644
 --- a/internal/upf/upf.go
 +++ b/internal/upf/upf.go
 @@ -109,28 +109,34 @@ func Start(ctx context.Context, smfHandler engine.SMFReportHandler, n3Interface
@@ -249,6 +299,33 @@ index 5f65b2e9..a6f2994f 100644
  	err := u.se.BpfObjects.LoadWithMapReplacements()
  	if err != nil {
  		return fmt.Errorf("couldn't load BPF objects: %w", err)
+@@ -482,7 +515,7 @@ func (u *UPF) collectCollectionTrackingGarbage(ctx context.Context) {
+ 			return
+ 		}
+ 
+-		nsSinceBoot := sysInfo.Uptime * time.Second.Nanoseconds()
++		nsSinceBoot := int64(sysInfo.Uptime) * time.Second.Nanoseconds()
+ 		expiryThreshold := nsSinceBoot - ConnTrackTimeout.Nanoseconds()
+ 
+ 		ct_entries := u.se.BpfObjects.NatCt.Iterate()
+@@ -759,7 +792,7 @@ func (u *UPF) collectExpiredFlows(ctx context.Context, flowch chan flowReport) {
+ 				return
+ 			}
+ 
+-			nsSinceBoot := sysInfo.Uptime * time.Second.Nanoseconds()
++			nsSinceBoot := int64(sysInfo.Uptime) * time.Second.Nanoseconds()
+ 			u.scanAndEnqueueExpiredFlows(nsSinceBoot-InactiveFlowTimeout.Nanoseconds(), flowch)
+ 
+ 			return
+@@ -773,7 +806,7 @@ func (u *UPF) collectExpiredFlows(ctx context.Context, flowch chan flowReport) {
+ 			return
+ 		}
+ 
+-		nsSinceBoot := sysInfo.Uptime * time.Second.Nanoseconds()
++		nsSinceBoot := int64(sysInfo.Uptime) * time.Second.Nanoseconds()
+ 		u.scanAndEnqueueExpiredFlows(nsSinceBoot-InactiveFlowTimeout.Nanoseconds(), flowch)
+ 	}
+ }
 --- /dev/null
 +++ b/internal/upf/gtpu_forwarder.go
 @@ -0,0 +1,321 @@
