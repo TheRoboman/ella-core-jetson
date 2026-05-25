@@ -127,8 +127,170 @@ index b016f044..a733c56e 100644
  	return nil
  }
  
+diff --git a/internal/upf/ebpf/pdr.go b/internal/upf/ebpf/pdr.go
+index 8449064f..c869608c 100644
+--- a/internal/upf/ebpf/pdr.go
++++ b/internal/upf/ebpf/pdr.go
+@@ -49,6 +49,10 @@ func (bpfObjects *BpfObjects) PutPdrUplink(teid uint32, pdrInfo PdrInfo) error {
+ 
+ 	pdrToStore := ToN3N6EntrypointPdrInfo(pdrInfo)
+ 
++	if bpfObjects.PdrsUplink == nil {
++		logger.UpfLog.Debug("PdrsUplink map unavailable (kernel lacks BTF), PDR not persisted")
++		return nil
++	}
+ 	return bpfObjects.PdrsUplink.Put(teid, unsafe.Pointer(&pdrToStore))
+ }
+ 
+@@ -58,10 +62,16 @@ func (bpfObjects *BpfObjects) PutPdrDownlink(addr netip.Addr, pdrInfo PdrInfo) e
+ 	pdrToStore := ToN3N6EntrypointPdrInfo(pdrInfo)
+ 
+ 	if addr.Is4() {
++		if bpfObjects.PdrsDownlinkIp4 == nil {
++			return nil
++		}
+ 		key := addr.As4()
+ 		return bpfObjects.PdrsDownlinkIp4.Put(key, unsafe.Pointer(&pdrToStore))
+ 	}
+ 
++	if bpfObjects.PdrsDownlinkIp6 == nil {
++		return nil
++	}
+ 	key := addr.As16()
+ 
+ 	return bpfObjects.PdrsDownlinkIp6.Put(key, unsafe.Pointer(&pdrToStore))
+@@ -69,6 +79,9 @@ func (bpfObjects *BpfObjects) PutPdrDownlink(addr netip.Addr, pdrInfo PdrInfo) e
+ 
+ func (bpfObjects *BpfObjects) DeletePdrUplink(teid uint32) error {
+ 	logger.UpfLog.Debug("Delete PDR Uplink", logger.TEID(teid))
++	if bpfObjects.PdrsUplink == nil {
++		return nil
++	}
+ 	return bpfObjects.PdrsUplink.Delete(teid)
+ }
+ 
+@@ -76,10 +89,16 @@ func (bpfObjects *BpfObjects) DeletePdrDownlink(addr netip.Addr) error {
+ 	logger.UpfLog.Debug("Delete PDR Downlink", logger.IPAddress(addr.String()))
+ 
+ 	if addr.Is4() {
++		if bpfObjects.PdrsDownlinkIp4 == nil {
++			return nil
++		}
+ 		key := addr.As4()
+ 		return bpfObjects.PdrsDownlinkIp4.Delete(key)
+ 	}
+ 
++	if bpfObjects.PdrsDownlinkIp6 == nil {
++		return nil
++	}
+ 	key := addr.As16()
+ 
+ 	return bpfObjects.PdrsDownlinkIp6.Delete(key)
+@@ -144,6 +163,9 @@ type SdfFilterList struct {
+ }
+ 
+ func (bpfObjects *BpfObjects) NewUrr(id uint32) error {
++	if bpfObjects.UrrMap == nil {
++		return nil
++	}
+ 	zeroVals := make([]uint64, runtime.NumCPU())
+ 
+ 	err := bpfObjects.UrrMap.Put(id, zeroVals)
+@@ -155,6 +177,9 @@ func (bpfObjects *BpfObjects) NewUrr(id uint32) error {
+ }
+ 
+ func (bpfObjects *BpfObjects) DeleteUrr(id uint32) error {
++	if bpfObjects.UrrMap == nil {
++		return nil
++	}
+ 	err := bpfObjects.UrrMap.Delete(id)
+ 	if err != nil {
+ 		return fmt.Errorf("failed to delete URR: %w", err)
+@@ -203,12 +228,18 @@ func ToN3N6EntrypointPdrInfo(defaultPdr PdrInfo) N3N6EntrypointPdrInfo {
+ 
+ // PutSdfFilterList writes a filter list into the sdf_filters BPF array.
+ func (b *BpfObjects) PutSdfFilterList(index uint32, list SdfFilterList) error {
++	if b.SdfFilters == nil {
++		return nil
++	}
+ 	return b.SdfFilters.Put(index, unsafe.Pointer(&list))
+ }
+ 
+ // DeleteSdfFilterList zeroes the slot at index.
+ // BPF_MAP_TYPE_ARRAY cannot truly delete entries; zeroing is correct.
+ func (b *BpfObjects) DeleteSdfFilterList(index uint32) error {
++	if b.SdfFilters == nil {
++		return nil
++	}
+ 	var empty SdfFilterList
+ 	return b.SdfFilters.Put(index, unsafe.Pointer(&empty))
+ }
+diff --git a/internal/upf/ebpf/stats.go b/internal/upf/ebpf/stats.go
+index 81ce1575..f70de357 100644
+--- a/internal/upf/ebpf/stats.go
++++ b/internal/upf/ebpf/stats.go
+@@ -16,6 +16,9 @@ const (
+ func getUpfN3XdpStatisticField(bpfObjects *BpfObjects, field uint32) uint64 {
+ 	var statistics []N3N6EntrypointUpfStatistic
+ 
++	if bpfObjects == nil || bpfObjects.UplinkStatistics == nil {
++		return 0
++	}
+ 	err := bpfObjects.UplinkStatistics.Lookup(uint32(0), &statistics)
+ 	if err != nil {
+ 		logger.UpfLog.Warn("failed to fetch UPF N3 stats", zap.Error(err))
+@@ -33,6 +36,9 @@ func getUpfN3XdpStatisticField(bpfObjects *BpfObjects, field uint32) uint64 {
+ func getUpfN6XdpStatisticField(bpfObjects *BpfObjects, field uint32) uint64 {
+ 	var statistics []N3N6EntrypointUpfStatistic
+ 
++	if bpfObjects == nil || bpfObjects.DownlinkStatistics == nil {
++		return 0
++	}
+ 	err := bpfObjects.DownlinkStatistics.Lookup(uint32(0), &statistics)
+ 	if err != nil {
+ 		logger.UpfLog.Warn("failed to fetch UPF N6 stats", zap.Error(err))
+@@ -123,6 +129,9 @@ func aggregateRouteStats(perCPUStats []N3N6EntrypointRouteStat) RouteStats {
+ func GetN3RouteStats(bpfObjects *BpfObjects) RouteStats {
+ 	var stats []N3N6EntrypointRouteStat
+ 
++	if bpfObjects == nil || bpfObjects.UplinkRouteStats == nil {
++		return RouteStats{}
++	}
+ 	err := bpfObjects.UplinkRouteStats.Lookup(uint32(0), &stats)
+ 	if err != nil {
+ 		logger.UpfLog.Warn("failed to fetch UPF N3 route stats", zap.Error(err))
+@@ -135,6 +144,9 @@ func GetN3RouteStats(bpfObjects *BpfObjects) RouteStats {
+ func GetN6RouteStats(bpfObjects *BpfObjects) RouteStats {
+ 	var stats []N3N6EntrypointRouteStat
+ 
++	if bpfObjects == nil || bpfObjects.DownlinkRouteStats == nil {
++		return RouteStats{}
++	}
+ 	err := bpfObjects.DownlinkRouteStats.Lookup(uint32(0), &stats)
+ 	if err != nil {
+ 		logger.UpfLog.Warn("failed to fetch UPF N6 route stats", zap.Error(err))
+@@ -147,6 +159,9 @@ func GetN6RouteStats(bpfObjects *BpfObjects) RouteStats {
+ func GetN3UplinkThroughputStats(bpfObjects *BpfObjects) uint64 {
+ 	var n3Statistics []N3N6EntrypointUpfStatistic
+ 
++	if bpfObjects == nil || bpfObjects.UplinkStatistics == nil {
++		return 0
++	}
+ 	err := bpfObjects.UplinkStatistics.Lookup(uint32(0), &n3Statistics)
+ 	if err != nil {
+ 		logger.UpfLog.Warn("failed to fetch UPF N3 stats", zap.Error(err))
+@@ -164,6 +179,9 @@ func GetN3UplinkThroughputStats(bpfObjects *BpfObjects) uint64 {
+ func GetN6DownlinkThroughputStats(bpfObjects *BpfObjects) uint64 {
+ 	var n6Statistics []N3N6EntrypointUpfStatistic
+ 
++	if bpfObjects == nil || bpfObjects.DownlinkStatistics == nil {
++		return 0
++	}
+ 	err := bpfObjects.DownlinkStatistics.Lookup(uint32(0), &n6Statistics)
+ 	if err != nil {
+ 		logger.UpfLog.Warn("failed to fetch UPF N6 stats", zap.Error(err))
 diff --git a/internal/upf/upf.go b/internal/upf/upf.go
-index 5f65b2e9..881bb339 100644
+index 5f65b2e9..f98db55b 100644
 --- a/internal/upf/upf.go
 +++ b/internal/upf/upf.go
 @@ -109,28 +109,34 @@ func Start(ctx context.Context, smfHandler engine.SMFReportHandler, n3Interface
@@ -207,7 +369,18 @@ index 5f65b2e9..881bb339 100644
  	}
  
  	upf := &UPF{
-@@ -195,18 +206,25 @@ func Start(ctx context.Context, smfHandler engine.SMFReportHandler, n3Interface
+@@ -174,7 +185,9 @@ func Start(ctx context.Context, smfHandler engine.SMFReportHandler, n3Interface
+ 		n3IPv6Addr = parsed
+ 	}
+ 
+-	if n3IPv4Addr.IsValid() || n3IPv6Addr.IsValid() {
++	if bpfObjects.UserspaceMode || bpfObjects.RsEventMap == nil {
++		logger.UpfLog.Info("Skipping RA responder (userspace UPF mode or RsEventMap unavailable)")
++	} else if n3IPv4Addr.IsValid() || n3IPv6Addr.IsValid() {
+ 		raResp, err := NewRAResponder(bpfObjects.RsEventMap, n3IPv4Addr, n3IPv6Addr, n3Iface.Index)
+ 		if err != nil {
+ 			logger.UpfLog.Warn("failed to create RA responder, IPv6 RS/RA will be unavailable", zap.Error(err))
+@@ -195,18 +208,25 @@ func Start(ctx context.Context, smfHandler engine.SMFReportHandler, n3Interface
  		)
  	}
  
@@ -243,7 +416,7 @@ index 5f65b2e9..881bb339 100644
  	}
  
  	return upf, nil
-@@ -236,20 +254,26 @@ func (u *UPF) Close(ctx context.Context) {
+@@ -236,20 +256,26 @@ func (u *UPF) Close(ctx context.Context) {
  			}
  		}
  
@@ -276,7 +449,7 @@ index 5f65b2e9..881bb339 100644
  		}
  	}()
  
-@@ -300,6 +324,11 @@ func (u *UPF) UpdateFilters(ctx context.Context, policyID string, direction mode
+@@ -300,6 +326,11 @@ func (u *UPF) UpdateFilters(ctx context.Context, policyID string, direction mode
  func (u *UPF) ReloadNAT(masquerade bool) error {
  	u.se.BpfObjects.Masquerade = masquerade
  
@@ -288,7 +461,7 @@ index 5f65b2e9..881bb339 100644
  	err := u.se.BpfObjects.LoadWithMapReplacements()
  	if err != nil {
  		return fmt.Errorf("couldn't load BPF objects: %w", err)
-@@ -327,6 +356,10 @@ func (u *UPF) ReloadNAT(masquerade bool) error {
+@@ -327,6 +358,10 @@ func (u *UPF) ReloadNAT(masquerade bool) error {
  func (u *UPF) ReloadFlowAccounting(flowact bool) error {
  	u.se.BpfObjects.FlowAccounting = flowact
  
@@ -299,7 +472,7 @@ index 5f65b2e9..881bb339 100644
  	err := u.se.BpfObjects.LoadWithMapReplacements()
  	if err != nil {
  		return fmt.Errorf("couldn't load BPF objects: %w", err)
-@@ -482,7 +515,7 @@ func (u *UPF) collectCollectionTrackingGarbage(ctx context.Context) {
+@@ -482,7 +517,7 @@ func (u *UPF) collectCollectionTrackingGarbage(ctx context.Context) {
  			return
  		}
  
@@ -308,7 +481,7 @@ index 5f65b2e9..881bb339 100644
  		expiryThreshold := nsSinceBoot - ConnTrackTimeout.Nanoseconds()
  
  		ct_entries := u.se.BpfObjects.NatCt.Iterate()
-@@ -759,7 +792,7 @@ func (u *UPF) collectExpiredFlows(ctx context.Context, flowch chan flowReport) {
+@@ -759,7 +794,7 @@ func (u *UPF) collectExpiredFlows(ctx context.Context, flowch chan flowReport) {
  				return
  			}
  
@@ -317,7 +490,7 @@ index 5f65b2e9..881bb339 100644
  			u.scanAndEnqueueExpiredFlows(nsSinceBoot-InactiveFlowTimeout.Nanoseconds(), flowch)
  
  			return
-@@ -773,7 +806,7 @@ func (u *UPF) collectExpiredFlows(ctx context.Context, flowch chan flowReport) {
+@@ -773,7 +808,7 @@ func (u *UPF) collectExpiredFlows(ctx context.Context, flowch chan flowReport) {
  			return
  		}
  

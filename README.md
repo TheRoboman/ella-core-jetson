@@ -28,10 +28,13 @@ ella-core-jetson/
 │   └── start-ella-core.sh             # Start the patched binary (Jetson)
 ├── sd-card/                           # ADRV9361-Z7035 deployment
 │   ├── cross-compile.sh               # Build Ella Core for armv7
-│   └── build-sd-card.sh               # Build minimal Debian SD card
+│   ├── build-sd-card.sh               # Build minimal Debian SD card
+│   ├── build-kernel.sh                # Build custom Zynq kernel
+│   │                                  #   (SCTP + netfilter + BTF enabled)
+│   └── deploy-kernel.sh               # Replace uImage/dtb on SD card
 └── patches/
     ├── userspace-upf-and-armv7.patch  # Git patch against ellanetworks/core v1.10.2
-    │                                  #   (userspace UPF + armv7 32-bit fixes)
+    │                                  #   (userspace UPF + nil-map guards + armv7 32-bit fixes)
     └── gtpu_forwarder.go              # New file: userspace GTP-U forwarder
 ```
 
@@ -40,7 +43,7 @@ ella-core-jetson/
 | Target | Status | Doc |
 |--------|--------|-----|
 | Jetson AGX Orin (aarch64, kernel 5.15) | ✅ Validated | This README |
-| ADRV9361-Z7035 (armv7, Cortex-A9) | 🚧 SD card built, awaiting boot | [ADRV9361_DEPLOYMENT.md](docs/ADRV9361_DEPLOYMENT.md) |
+| ADRV9361-Z7035 (armv7, Cortex-A9) | ✅ Validated (full UE attach via custom kernel) | [ADRV9361_DEPLOYMENT.md](docs/ADRV9361_DEPLOYMENT.md), [results](docs/ADRV9361_RESULTS.md) |
 
 ## Quick Start
 

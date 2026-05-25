@@ -121,7 +121,10 @@ EOF
 
 cat > /tmp/sd_root/etc/fstab <<'EOF'
 /dev/mmcblk0p2  /        ext4   defaults,noatime  0  1
-/dev/mmcblk0p1  /boot    vfat   defaults          0  2
+# Note: /dev/mmcblk0p1 (boot) intentionally not mounted at runtime —
+# the Zynq SD controller's udev event for p1 races with systemd's wait,
+# causing a 90s boot hang. U-Boot reads the boot partition before kernel
+# starts, so we don't need it mounted later.
 proc            /proc    proc   defaults          0  0
 EOF
 
@@ -149,6 +152,14 @@ sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /tmp/sd_root/
 # Pre-generate SSH host keys
 chroot /tmp/sd_root /usr/bin/ssh-keygen -A
 chroot /tmp/sd_root /bin/systemctl enable ssh
+
+# Switch iptables to legacy (our custom Zynq kernel has classic netfilter, not nftables)
+# Debian 12 defaults to nftables backend.
+chroot /tmp/sd_root /usr/sbin/update-alternatives --set iptables /usr/sbin/iptables-legacy 2>/dev/null || true
+chroot /tmp/sd_root /usr/sbin/update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy 2>/dev/null || true
+
+# Mask getty@ttyPS0 to avoid 90s boot delay (race: device shows up after timeout)
+chroot /tmp/sd_root /bin/systemctl mask getty@ttyPS0.service 2>/dev/null || true
 
 # ---- step 7: install Ella Core ----
 echo "==> Installing Ella Core armv7"
@@ -193,11 +204,15 @@ EOF
 
 cat > /tmp/sd_root/opt/ella-core/setup-net.sh <<'EOF'
 #!/bin/bash
-set -e
+# Best-effort: ip_forward + NAT for UE traffic. If iptables fails (kernel
+# missing netfilter), don't block service startup — Ella Core still works
+# as a control-plane only.
 sysctl -w net.ipv4.ip_forward=1
 if ! iptables -t nat -C POSTROUTING -s 10.45.0.0/16 ! -o ellatun -j MASQUERADE 2>/dev/null; then
-    iptables -t nat -A POSTROUTING -s 10.45.0.0/16 ! -o ellatun -j MASQUERADE
+    iptables -t nat -A POSTROUTING -s 10.45.0.0/16 ! -o ellatun -j MASQUERADE 2>/dev/null || \
+        echo "WARNING: iptables NAT unavailable (kernel without netfilter) — UE-to-internet routing disabled"
 fi
+exit 0
 EOF
 chmod +x /tmp/sd_root/opt/ella-core/setup-net.sh
 
