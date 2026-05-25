@@ -19,13 +19,18 @@ ella-core-jetson/
 ├── configs/
 │   ├── ella-core.yaml                 # Ella Core config (N2/N3/N6 interfaces)
 │   ├── gnb_cpu_zmq_ella.yaml          # srsRAN gNB → Ella Core (ZMQ)
-│   ├── gnb_oai_rfsim_ella.conf        # OAI gNB → Ella Core (rfsim)
+│   ├── gnb_oai_rfsim_ella.conf        # OAI gNB → Jetson Ella Core (rfsim)
+│   ├── gnb_oai_rfsim_adrv.conf        # OAI gNB → ADRV board 5GC (rfsim)
 │   ├── oai_nrue_rfsim_ella.conf       # OAI nrUE for rfsim testing
-│   ├── ueransim_gnb_ella.yaml         # UERANSIM gNB → Ella Core
-│   └── ueransim_ue_ella.yaml          # UERANSIM UE (NAS-level test)
+│   ├── ueransim_gnb_ella.yaml         # UERANSIM gNB → Jetson Ella Core
+│   ├── ueransim_gnb_adrv.yaml         # UERANSIM gNB → ADRV board 5GC
+│   ├── ueransim_ue_ella.yaml          # UERANSIM UE (Jetson 5GC)
+│   └── ueransim_ue_adrv.yaml          # UERANSIM UE (ADRV board 5GC)
 ├── scripts/
 │   ├── setup-ella-net.sh              # Create veth/dummy interfaces (Jetson)
-│   └── start-ella-core.sh             # Start the patched binary (Jetson)
+│   ├── start-ella-core.sh             # Start the patched binary (Jetson)
+│   └── test-split-perf.sh             # End-to-end performance test
+│                                      #   (Jetson gNB → board 5GC)
 ├── sd-card/                           # ADRV9361-Z7035 deployment
 │   ├── cross-compile.sh               # Build Ella Core for armv7
 │   ├── build-sd-card.sh               # Build minimal Debian SD card
@@ -44,6 +49,7 @@ ella-core-jetson/
 |--------|--------|-----|
 | Jetson AGX Orin (aarch64, kernel 5.15) | ✅ Validated | This README |
 | ADRV9361-Z7035 (armv7, Cortex-A9) | ✅ Validated (full UE attach via custom kernel) | [ADRV9361_DEPLOYMENT.md](docs/ADRV9361_DEPLOYMENT.md), [results](docs/ADRV9361_RESULTS.md) |
+| Split: Jetson gNB → ADRV 5GC (Ethernet) | ✅ Validated with OAI rfsim + data plane | [SPLIT_PERFORMANCE.md](docs/SPLIT_PERFORMANCE.md) |
 
 ## Quick Start
 

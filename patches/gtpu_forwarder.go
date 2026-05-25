@@ -28,9 +28,13 @@ const (
 // Uplink: GTP-U on N3 (UDP:2152) → decap → write to TUN (ogstun)
 // Downlink: read from TUN → lookup UE IP → encap GTP-U → send to gNB
 func (u *UPF) runUserspaceForwarder(ctx context.Context, n3Addr string, n3IfIndex int) {
-	// Create TUN device for UE traffic (use "ellatun" to avoid conflict with Open5GS ogstun)
+	// Create TUN device for UE traffic. We use 10.45.0.254 as the UPF-side
+	// gateway address so it doesn't collide with the UE's own address
+	// (UEs are allocated from the same pool starting at 10.45.0.1). If we
+	// gave ellatun 10.45.0.1, the board kernel would deliver downlink
+	// replies addressed to the UE to itself instead of out the TUN.
 	tunName := "ellatun"
-	tun, err := createOrOpenTun(tunName, "10.45.0.1/16")
+	tun, err := createOrOpenTun(tunName, "10.45.0.254/16")
 	if err != nil {
 		logger.UpfLog.Error("Failed to create/open TUN device", zap.Error(err))
 		return
@@ -226,12 +230,13 @@ func (u *UPF) forwardDownlink(ctx context.Context, tun *water.Interface, conn *n
 	}
 }
 
-// lookupUplinkPDR looks up a PDR by TEID using the BPF map.
+// lookupUplinkPDR looks up a PDR by TEID using the kernel BPF map if
+// available, otherwise the Go-map fallback.
 func (u *UPF) lookupUplinkPDR(teid uint32) (ebpf.N3N6EntrypointPdrInfo, bool) {
-	var pdr ebpf.N3N6EntrypointPdrInfo
 	if u.se.BpfObjects.PdrsUplink == nil {
-		return pdr, false
+		return u.se.BpfObjects.LookupGoPdrUplink(teid)
 	}
+	var pdr ebpf.N3N6EntrypointPdrInfo
 	err := u.se.BpfObjects.PdrsUplink.Lookup(teid, unsafe.Pointer(&pdr))
 	if err != nil {
 		return pdr, false
@@ -239,24 +244,26 @@ func (u *UPF) lookupUplinkPDR(teid uint32) (ebpf.N3N6EntrypointPdrInfo, bool) {
 	return pdr, true
 }
 
-// lookupDownlinkPDR looks up a PDR by UE IP using the BPF map.
+// lookupDownlinkPDR looks up a PDR by UE IP using the kernel BPF map if
+// available, otherwise the Go-map fallback.
 func (u *UPF) lookupDownlinkPDR(addr netip.Addr) (ebpf.N3N6EntrypointPdrInfo, bool) {
-	var pdr ebpf.N3N6EntrypointPdrInfo
 	if addr.Is4() {
-		if u.se.BpfObjects.PdrsDownlinkIp4 == nil {
-			return pdr, false
-		}
 		key := addr.As4()
+		if u.se.BpfObjects.PdrsDownlinkIp4 == nil {
+			return u.se.BpfObjects.LookupGoPdrDownlinkV4(key)
+		}
+		var pdr ebpf.N3N6EntrypointPdrInfo
 		err := u.se.BpfObjects.PdrsDownlinkIp4.Lookup(key, unsafe.Pointer(&pdr))
 		if err != nil {
 			return pdr, false
 		}
 		return pdr, true
 	}
-	if u.se.BpfObjects.PdrsDownlinkIp6 == nil {
-		return pdr, false
-	}
 	key := addr.As16()
+	if u.se.BpfObjects.PdrsDownlinkIp6 == nil {
+		return u.se.BpfObjects.LookupGoPdrDownlinkV6(key)
+	}
+	var pdr ebpf.N3N6EntrypointPdrInfo
 	err := u.se.BpfObjects.PdrsDownlinkIp6.Lookup(key, unsafe.Pointer(&pdr))
 	if err != nil {
 		return pdr, false

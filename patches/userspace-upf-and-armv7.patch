@@ -49,10 +49,10 @@ index 9d834f63..7d107e33 100644
  
  		totalExtracted += hdr.Size
 diff --git a/internal/upf/ebpf/objects.go b/internal/upf/ebpf/objects.go
-index b016f044..a733c56e 100644
+index b016f044..ae8ca353 100644
 --- a/internal/upf/ebpf/objects.go
 +++ b/internal/upf/ebpf/objects.go
-@@ -59,6 +59,10 @@ type BpfObjects struct {
+@@ -59,6 +59,17 @@ type BpfObjects struct {
  	N6Vlan           uint32
  	pagingMu         sync.Mutex
  	pagingList       map[DataNotification]bool
@@ -60,10 +60,57 @@ index b016f044..a733c56e 100644
 +	// UserspaceMode is true when the XDP program could not be loaded and
 +	// the data plane runs as a userspace GTP-U forwarder.
 +	UserspaceMode bool
++
++	// Go-map fallbacks for PDR storage when kernel BPF maps are unavailable
++	// (kernel lacks BTF or other features needed for map creation).
++	goMu             sync.RWMutex
++	goPdrsUplink     map[uint32]N3N6EntrypointPdrInfo
++	goPdrsDownlinkV4 map[[4]byte]N3N6EntrypointPdrInfo
++	goPdrsDownlinkV6 map[[16]byte]N3N6EntrypointPdrInfo
  }
  
  func NewBpfObjects(flowact bool, masquerade bool, n3ifindex int, n6ifindex int, n3vlan uint32, n6vlan uint32) *BpfObjects {
-@@ -88,16 +92,56 @@ func (bpfObjects *BpfObjects) Load() error {
+@@ -70,9 +81,39 @@ func NewBpfObjects(flowact bool, masquerade bool, n3ifindex int, n6ifindex int,
+ 		N3Vlan:           n3vlan,
+ 		N6Vlan:           n6vlan,
+ 		pagingList:       make(map[DataNotification]bool),
++		goPdrsUplink:     make(map[uint32]N3N6EntrypointPdrInfo),
++		goPdrsDownlinkV4: make(map[[4]byte]N3N6EntrypointPdrInfo),
++		goPdrsDownlinkV6: make(map[[16]byte]N3N6EntrypointPdrInfo),
+ 	}
+ }
+ 
++// LookupGoPdrUplink returns the in-memory uplink PDR for a TEID (used by the
++// userspace GTP-U forwarder when kernel BPF maps are unavailable).
++func (b *BpfObjects) LookupGoPdrUplink(teid uint32) (N3N6EntrypointPdrInfo, bool) {
++	b.goMu.RLock()
++	defer b.goMu.RUnlock()
++	pdr, ok := b.goPdrsUplink[teid]
++	return pdr, ok
++}
++
++// LookupGoPdrDownlinkV4 returns the in-memory downlink PDR for an IPv4 UE
++// address.
++func (b *BpfObjects) LookupGoPdrDownlinkV4(key [4]byte) (N3N6EntrypointPdrInfo, bool) {
++	b.goMu.RLock()
++	defer b.goMu.RUnlock()
++	pdr, ok := b.goPdrsDownlinkV4[key]
++	return pdr, ok
++}
++
++// LookupGoPdrDownlinkV6 returns the in-memory downlink PDR for an IPv6 UE
++// address.
++func (b *BpfObjects) LookupGoPdrDownlinkV6(key [16]byte) (N3N6EntrypointPdrInfo, bool) {
++	b.goMu.RLock()
++	defer b.goMu.RUnlock()
++	pdr, ok := b.goPdrsDownlinkV6[key]
++	return pdr, ok
++}
++
+ func (bpfObjects *BpfObjects) Load() error {
+ 	n3n6Spec, err := LoadN3N6Entrypoint()
+ 	if err != nil {
+@@ -88,16 +129,56 @@ func (bpfObjects *BpfObjects) Load() error {
  		m.MaxEntries = uint32(runtime.NumCPU())
  	}
  
@@ -128,65 +175,82 @@ index b016f044..a733c56e 100644
  }
  
 diff --git a/internal/upf/ebpf/pdr.go b/internal/upf/ebpf/pdr.go
-index 8449064f..c869608c 100644
+index 8449064f..e3f6c5a8 100644
 --- a/internal/upf/ebpf/pdr.go
 +++ b/internal/upf/ebpf/pdr.go
-@@ -49,6 +49,10 @@ func (bpfObjects *BpfObjects) PutPdrUplink(teid uint32, pdrInfo PdrInfo) error {
+@@ -49,6 +49,13 @@ func (bpfObjects *BpfObjects) PutPdrUplink(teid uint32, pdrInfo PdrInfo) error {
  
  	pdrToStore := ToN3N6EntrypointPdrInfo(pdrInfo)
  
 +	if bpfObjects.PdrsUplink == nil {
-+		logger.UpfLog.Debug("PdrsUplink map unavailable (kernel lacks BTF), PDR not persisted")
++		// Userspace fallback when kernel BPF maps are unavailable.
++		bpfObjects.goMu.Lock()
++		bpfObjects.goPdrsUplink[teid] = pdrToStore
++		bpfObjects.goMu.Unlock()
 +		return nil
 +	}
  	return bpfObjects.PdrsUplink.Put(teid, unsafe.Pointer(&pdrToStore))
  }
  
-@@ -58,10 +62,16 @@ func (bpfObjects *BpfObjects) PutPdrDownlink(addr netip.Addr, pdrInfo PdrInfo) e
- 	pdrToStore := ToN3N6EntrypointPdrInfo(pdrInfo)
+@@ -59,16 +66,34 @@ func (bpfObjects *BpfObjects) PutPdrDownlink(addr netip.Addr, pdrInfo PdrInfo) e
  
  	if addr.Is4() {
+ 		key := addr.As4()
 +		if bpfObjects.PdrsDownlinkIp4 == nil {
++			bpfObjects.goMu.Lock()
++			bpfObjects.goPdrsDownlinkV4[key] = pdrToStore
++			bpfObjects.goMu.Unlock()
 +			return nil
 +		}
- 		key := addr.As4()
  		return bpfObjects.PdrsDownlinkIp4.Put(key, unsafe.Pointer(&pdrToStore))
  	}
  
+ 	key := addr.As16()
 +	if bpfObjects.PdrsDownlinkIp6 == nil {
++		bpfObjects.goMu.Lock()
++		bpfObjects.goPdrsDownlinkV6[key] = pdrToStore
++		bpfObjects.goMu.Unlock()
 +		return nil
 +	}
- 	key := addr.As16()
  
  	return bpfObjects.PdrsDownlinkIp6.Put(key, unsafe.Pointer(&pdrToStore))
-@@ -69,6 +79,9 @@ func (bpfObjects *BpfObjects) PutPdrDownlink(addr netip.Addr, pdrInfo PdrInfo) e
+ }
  
  func (bpfObjects *BpfObjects) DeletePdrUplink(teid uint32) error {
  	logger.UpfLog.Debug("Delete PDR Uplink", logger.TEID(teid))
 +	if bpfObjects.PdrsUplink == nil {
++		bpfObjects.goMu.Lock()
++		delete(bpfObjects.goPdrsUplink, teid)
++		bpfObjects.goMu.Unlock()
 +		return nil
 +	}
  	return bpfObjects.PdrsUplink.Delete(teid)
  }
  
-@@ -76,10 +89,16 @@ func (bpfObjects *BpfObjects) DeletePdrDownlink(addr netip.Addr) error {
- 	logger.UpfLog.Debug("Delete PDR Downlink", logger.IPAddress(addr.String()))
+@@ -77,10 +102,22 @@ func (bpfObjects *BpfObjects) DeletePdrDownlink(addr netip.Addr) error {
  
  	if addr.Is4() {
+ 		key := addr.As4()
 +		if bpfObjects.PdrsDownlinkIp4 == nil {
++			bpfObjects.goMu.Lock()
++			delete(bpfObjects.goPdrsDownlinkV4, key)
++			bpfObjects.goMu.Unlock()
 +			return nil
 +		}
- 		key := addr.As4()
  		return bpfObjects.PdrsDownlinkIp4.Delete(key)
  	}
  
+ 	key := addr.As16()
 +	if bpfObjects.PdrsDownlinkIp6 == nil {
++		bpfObjects.goMu.Lock()
++		delete(bpfObjects.goPdrsDownlinkV6, key)
++		bpfObjects.goMu.Unlock()
 +		return nil
 +	}
- 	key := addr.As16()
  
  	return bpfObjects.PdrsDownlinkIp6.Delete(key)
-@@ -144,6 +163,9 @@ type SdfFilterList struct {
+ }
+@@ -144,6 +181,9 @@ type SdfFilterList struct {
  }
  
  func (bpfObjects *BpfObjects) NewUrr(id uint32) error {
@@ -196,7 +260,7 @@ index 8449064f..c869608c 100644
  	zeroVals := make([]uint64, runtime.NumCPU())
  
  	err := bpfObjects.UrrMap.Put(id, zeroVals)
-@@ -155,6 +177,9 @@ func (bpfObjects *BpfObjects) NewUrr(id uint32) error {
+@@ -155,6 +195,9 @@ func (bpfObjects *BpfObjects) NewUrr(id uint32) error {
  }
  
  func (bpfObjects *BpfObjects) DeleteUrr(id uint32) error {
@@ -206,7 +270,7 @@ index 8449064f..c869608c 100644
  	err := bpfObjects.UrrMap.Delete(id)
  	if err != nil {
  		return fmt.Errorf("failed to delete URR: %w", err)
-@@ -203,12 +228,18 @@ func ToN3N6EntrypointPdrInfo(defaultPdr PdrInfo) N3N6EntrypointPdrInfo {
+@@ -203,12 +246,18 @@ func ToN3N6EntrypointPdrInfo(defaultPdr PdrInfo) N3N6EntrypointPdrInfo {
  
  // PutSdfFilterList writes a filter list into the sdf_filters BPF array.
  func (b *BpfObjects) PutSdfFilterList(index uint32, list SdfFilterList) error {
@@ -501,7 +565,7 @@ index 5f65b2e9..f98db55b 100644
  }
 --- /dev/null
 +++ b/internal/upf/gtpu_forwarder.go
-@@ -0,0 +1,321 @@
+@@ -0,0 +1,328 @@
 +// Copyright 2026 - Userspace GTP-U forwarder for kernels without XDP support
 +
 +package upf
@@ -532,9 +596,13 @@ index 5f65b2e9..f98db55b 100644
 +// Uplink: GTP-U on N3 (UDP:2152) → decap → write to TUN (ogstun)
 +// Downlink: read from TUN → lookup UE IP → encap GTP-U → send to gNB
 +func (u *UPF) runUserspaceForwarder(ctx context.Context, n3Addr string, n3IfIndex int) {
-+	// Create TUN device for UE traffic (use "ellatun" to avoid conflict with Open5GS ogstun)
++	// Create TUN device for UE traffic. We use 10.45.0.254 as the UPF-side
++	// gateway address so it doesn't collide with the UE's own address
++	// (UEs are allocated from the same pool starting at 10.45.0.1). If we
++	// gave ellatun 10.45.0.1, the board kernel would deliver downlink
++	// replies addressed to the UE to itself instead of out the TUN.
 +	tunName := "ellatun"
-+	tun, err := createOrOpenTun(tunName, "10.45.0.1/16")
++	tun, err := createOrOpenTun(tunName, "10.45.0.254/16")
 +	if err != nil {
 +		logger.UpfLog.Error("Failed to create/open TUN device", zap.Error(err))
 +		return
@@ -730,12 +798,13 @@ index 5f65b2e9..f98db55b 100644
 +	}
 +}
 +
-+// lookupUplinkPDR looks up a PDR by TEID using the BPF map.
++// lookupUplinkPDR looks up a PDR by TEID using the kernel BPF map if
++// available, otherwise the Go-map fallback.
 +func (u *UPF) lookupUplinkPDR(teid uint32) (ebpf.N3N6EntrypointPdrInfo, bool) {
-+	var pdr ebpf.N3N6EntrypointPdrInfo
 +	if u.se.BpfObjects.PdrsUplink == nil {
-+		return pdr, false
++		return u.se.BpfObjects.LookupGoPdrUplink(teid)
 +	}
++	var pdr ebpf.N3N6EntrypointPdrInfo
 +	err := u.se.BpfObjects.PdrsUplink.Lookup(teid, unsafe.Pointer(&pdr))
 +	if err != nil {
 +		return pdr, false
@@ -743,24 +812,26 @@ index 5f65b2e9..f98db55b 100644
 +	return pdr, true
 +}
 +
-+// lookupDownlinkPDR looks up a PDR by UE IP using the BPF map.
++// lookupDownlinkPDR looks up a PDR by UE IP using the kernel BPF map if
++// available, otherwise the Go-map fallback.
 +func (u *UPF) lookupDownlinkPDR(addr netip.Addr) (ebpf.N3N6EntrypointPdrInfo, bool) {
-+	var pdr ebpf.N3N6EntrypointPdrInfo
 +	if addr.Is4() {
-+		if u.se.BpfObjects.PdrsDownlinkIp4 == nil {
-+			return pdr, false
-+		}
 +		key := addr.As4()
++		if u.se.BpfObjects.PdrsDownlinkIp4 == nil {
++			return u.se.BpfObjects.LookupGoPdrDownlinkV4(key)
++		}
++		var pdr ebpf.N3N6EntrypointPdrInfo
 +		err := u.se.BpfObjects.PdrsDownlinkIp4.Lookup(key, unsafe.Pointer(&pdr))
 +		if err != nil {
 +			return pdr, false
 +		}
 +		return pdr, true
 +	}
-+	if u.se.BpfObjects.PdrsDownlinkIp6 == nil {
-+		return pdr, false
-+	}
 +	key := addr.As16()
++	if u.se.BpfObjects.PdrsDownlinkIp6 == nil {
++		return u.se.BpfObjects.LookupGoPdrDownlinkV6(key)
++	}
++	var pdr ebpf.N3N6EntrypointPdrInfo
 +	err := u.se.BpfObjects.PdrsDownlinkIp6.Lookup(key, unsafe.Pointer(&pdr))
 +	if err != nil {
 +		return pdr, false
