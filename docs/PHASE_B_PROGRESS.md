@@ -663,6 +663,99 @@ the latest diagnostic prints + the ULSCH NULL-skip fix.
 
 ---
 
+## 2026-05-26 update — coredump captured, two more format-string bugs fixed
+
+Set up cores on the board (`/tmp/cores/core.%e.%p.%t` + `ulimit -c
+unlimited`), reset the board (`shutdown -r now`) for a clean kernel
+SCTP state, and ran the full chain. Captured a 148 MB core for
+`TASK_RRC_GNB` and copied it back to the Jetson, pulled the board
+libs into a `/tmp/board_sysroot`, and opened it with `gdb-multiarch`.
+
+```
+Program terminated with signal SIGSEGV, Segmentation fault.
+#0  0xb6a6ac6e in strlen () from /tmp/board_sysroot/lib/arm-linux-gnueabihf/libc.so.6
+r0  = 0x8d48c1eb   (garbage pointer passed to strlen)
+r1  = 0x8d48c1e8
+lr  = 0xb6a3de49   (inside libc vfprintf)
+```
+
+So the crash is `strlen()` called on a garbage pointer from inside
+`vfprintf` — the classic printf format mismatch on armhf. The previous
+log lines before the crash showed the gNB had reached the GTP tunnel
+create path.
+
+Root cause confirmed at `openair3/ocp-gtpu/gtp_itf.cpp:723` (and a
+matching site at `:645` in `GtpuUpdateTunnelOutgoingAddressAndTeid`):
+
+```c
+LOG_I(GTPU,
+      "[%ld] UE ID %ld: Create tunnel TEID incoming 0x%x ... to remote IPv4 %s, ...",
+      instance,
+      ue_id,                  /* <-- ue_id is uint64_t (8 bytes), %ld reads 4 on armhf */
+      bearer.teid_incoming,
+      ...
+      inet_ntop(AF_INET, ...) /* <-- %s for IPv4 string */
+      ...);
+```
+
+On armhf `long` is 4 bytes but `ue_id_t` is `uint64_t` (8 bytes). After
+`%ld` consumes 4 of the 8 bytes, the varargs cursor is misaligned and
+the next `%s` reads a garbage pointer → `strlen()` SIGSEGV.
+
+Fix: cast `(uint64_t)ue_id` and use `%" PRIu64 "`, plus
+`#include <cinttypes>` at the top of the file.
+
+After this fix the chain reaches "Create tunnel TEID incoming 0x66213852
+outgoing 0x2 to remote IPv4 169.254.237.42" cleanly, SDAP entity is
+created, PDCP DRB 1 is added, RLC SRB 2 and DRB 1 attach to the UE,
+"trigger UE context setup request with 1 DRBs" runs, "DRB 1
+re-established" prints.
+
+The signaling chain has progressed quite far — last seen events:
+
+```
+[GTPU]   [92] UE ID 2: Create tunnel TEID incoming 0x66213852 outgoing 0x2 
+              to remote IPv4 169.254.237.42, IPv6 ::, port 2153
+[SDAP]   Default DRB for the created SDAP entity: DRB 1
+[PDCP]   Added DRB 1 to UE ID 43474368        ← still some format-string garbage
+[RRC]    activate SRB 2 of UE 2
+[RLC]    Added srb 2 to UE 10360              ← printf format garbage
+[RLC]    Added DRB to UE 10360
+[RRC]    UE 2 trigger UE context setup request with 1 DRBs
+[E1AP]   UE 2: updating PDU session ID 10 (1 bearers)
+[PDCP]   DRB 1 re-established
+```
+
+There are clearly more `%ld` vs `uint64_t` mismatches in PDCP/RLC
+("Added DRB 1 to UE ID 43474368" — 0x297F580, garbage; "UE 10360" —
+0x2878, also garbage). These don't crash because they don't have a
+trailing `%s`, but they do confuse log readers. The fundamental armhf
+fix pattern (`#include <inttypes.h>` and `%" PRIu64 "`) needs to be
+applied across PDCP, RLC, and SDAP files as a follow-up sweep.
+
+Final committed `patches/oai-armhf.patch` is 1304 lines, 28 files,
+captures every fix needed end-to-end *except* the remaining PDCP/RLC
+format-string sweep.
+
+### Tools / infrastructure notes
+
+- `ulimit -c unlimited` must be set *for the VNF process* on the board
+  (do it in the exec wrapper); the board has no PAM/systemd to
+  propagate this from `/etc/security/limits.conf`.
+- `gdb-multiarch` with `set sysroot /tmp/board_sysroot` correctly
+  resolves symbols. The board libs we mirrored are `/lib`, `/usr/lib`,
+  `/opt/oai/`.
+- `setsid + nohup + stdbuf -oL -eL` is the only combination that
+  keeps the PNF alive across the parent bash session AND flushes the
+  PNF stdio buffer so we can read its progress live.
+- Stale PNF processes on the Jetson accumulate as orphans across test
+  iterations. `sudo -n killall -9 nr-softmodem` reliably reaps them;
+  `pkill -9 -f ...` does not (the matches in `setsid` children are
+  shielded). Verify with `sudo -n ps -ef | grep nr-softmodem` between
+  iterations.
+
+---
+
 ## 2026-05-26 update — Data plane VERIFIED in monolithic mode
 
 Bypassed the nFAPI split by running OAI monolithic on the Jetson (L1+L2+L3
