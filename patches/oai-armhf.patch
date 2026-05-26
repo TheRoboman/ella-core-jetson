@@ -234,6 +234,23 @@ index 0b9139c407..3ec3bf79e2 100644
      case TYPE_DOUBLE:
        *param->dblptr = node[optname].as<double>();
        break;
+diff --git a/common/utils/system.c b/common/utils/system.c
+index e38d97768a..aa8017877c 100644
+--- a/common/utils/system.c
++++ b/common/utils/system.c
+@@ -287,7 +287,11 @@ void threadCreate(pthread_t* t, void * (*func)(void*), void * param, char* name,
+   strncpy(short_name, name, sizeof(short_name) - 1);
+   short_name[sizeof(short_name) - 1] = '\0';
+   ret = pthread_setname_np(*t, short_name);
+-  AssertFatal(ret == 0, "Error in pthread_setname_np(): ret: %d, errno: %d\n", ret, errno);
++  /* On Linux, pthread_setname_np writes to /proc/self/task/[tid]/comm.
++   * If the target thread has already exited (very short-lived helper),
++   * this returns ENOENT — cosmetic, not a real failure. Don't abort. */
++  if (ret != 0)
++    LOG_W(UTIL, "pthread_setname_np(%s) returned %d (errno %d)\n", short_name, ret, errno);
+ 
+   if (affinity != -1 ) {
+     cpu_set_t cpuset;
 diff --git a/common/utils/time_meas.h b/common/utils/time_meas.h
 index de79a0252d..dfa26119d5 100644
 --- a/common/utils/time_meas.h
@@ -265,6 +282,64 @@ index de79a0252d..dfa26119d5 100644
  }
  #endif
  
+diff --git a/nfapi/oai_integration/nfapi_vnf.c b/nfapi/oai_integration/nfapi_vnf.c
+index 777da7c319..48f0410a41 100644
+--- a/nfapi/oai_integration/nfapi_vnf.c
++++ b/nfapi/oai_integration/nfapi_vnf.c
+@@ -216,16 +216,27 @@ int pnf_nr_param_resp_cb(nfapi_vnf_config_t *config, int p5_idx, nfapi_nr_pnf_pa
+   vnf_info *vnf = (vnf_info *)(config->user_data);
+   pnf_info *pnf = vnf->pnfs;
+ 
+-  for(int i = 0; i < resp->pnf_phy.number_of_phys; ++i) {
++  /* Idempotent: ignore duplicate PARAM_RESP. OAI re-issues PARAM_REQUEST in
++   * pnf_nr_start_resp_cb after PNF START, so this callback fires twice for
++   * the same PNF connection. Each call would `nfapi_vnf_allocate_phy()` →
++   * next_phy_id++, ending up with pnf->phys[0].id = 2 instead of 1, which
++   * doesn't match the MAC's hardcoded phy_id=1 in DL_TTI_REQ. */
++  if (pnf->phys[0].id != 0) {
++    NFAPI_TRACE(NFAPI_TRACE_INFO, "[VNF] param_resp_cb: already have phy_id=%u, skipping reallocation\n",
++                pnf->phys[0].id);
++    return 0;
++  }
++
++  if (resp->pnf_phy.number_of_phys > 0) {
+     phy_info phy;
+-    memset(&phy,0,sizeof(phy));
+-    phy.index = resp->pnf_phy.phy[i].phy_config_index;
+-    NFAPI_TRACE(NFAPI_TRACE_INFO, "[VNF] (PHY:%d) phy_config_idx:%d\n", i, resp->pnf_phy.phy[i].phy_config_index);
++    memset(&phy, 0, sizeof(phy));
++    phy.index = resp->pnf_phy.phy[0].phy_config_index;
++    NFAPI_TRACE(NFAPI_TRACE_INFO, "[VNF] (PHY:0) phy_config_idx:%d\n", resp->pnf_phy.phy[0].phy_config_index);
+     nfapi_vnf_allocate_phy(config, p5_idx, &(phy.id));
+ 
+-    for(int j = 0; j < resp->pnf_phy.phy[i].number_of_rfs; ++j) {
+-      NFAPI_TRACE(NFAPI_TRACE_INFO, "[VNF] (PHY:%d) (RF%d) %d\n", i, j, resp->pnf_phy.phy[i].rf_config[j].rf_config_index);
+-      phy.rfs[0] = resp->pnf_phy.phy[i].rf_config[j].rf_config_index;
++    for (int j = 0; j < resp->pnf_phy.phy[0].number_of_rfs; ++j) {
++      NFAPI_TRACE(NFAPI_TRACE_INFO, "[VNF] (PHY:0) (RF%d) %d\n", j, resp->pnf_phy.phy[0].rf_config[j].rf_config_index);
++      phy.rfs[0] = resp->pnf_phy.phy[0].rf_config[j].rf_config_index;
+     }
+ 
+     pnf->phys[0] = phy;
+@@ -234,14 +245,11 @@ int pnf_nr_param_resp_cb(nfapi_vnf_config_t *config, int p5_idx, nfapi_nr_pnf_pa
+   memset(&req, 0, sizeof(req));
+   req.header.message_id = NFAPI_PNF_CONFIG_REQUEST;
+   req.pnf_phy_rf_config.tl.tag = NFAPI_PNF_PHY_RF_TAG;
+-  req.pnf_phy_rf_config.number_phy_rf_config_info = 2; // pnf.phys.size();
+-  NFAPI_TRACE(NFAPI_TRACE_INFO, "Hard coded num phy rf to 2\n");
++  req.pnf_phy_rf_config.number_phy_rf_config_info = 1;
+ 
+-  for(unsigned i = 0; i < 2; ++i) {
+-    req.pnf_phy_rf_config.phy_rf_config[i].phy_id = pnf->phys[i].id;
+-    req.pnf_phy_rf_config.phy_rf_config[i].phy_config_index = pnf->phys[i].index;
+-    req.pnf_phy_rf_config.phy_rf_config[i].rf_config_index = pnf->phys[i].rfs[0];
+-  }
++  req.pnf_phy_rf_config.phy_rf_config[0].phy_id = pnf->phys[0].id;
++  req.pnf_phy_rf_config.phy_rf_config[0].phy_config_index = pnf->phys[0].index;
++  req.pnf_phy_rf_config.phy_rf_config[0].rf_config_index = pnf->phys[0].rfs[0];
+ 
+   nfapi_nr_vnf_pnf_config_req(config, p5_idx, &req);
+   return 0;
 diff --git a/openair1/PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment/nrLDPC_coding_segment_encoder.c b/openair1/PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment/nrLDPC_coding_segment_encoder.c
 index c0cb6af49f..9119d9429f 100644
 --- a/openair1/PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment/nrLDPC_coding_segment_encoder.c
@@ -523,6 +598,40 @@ index ba4d192629..5617ce48ad 100644
  }
  
  static void inner_rx(PHY_VARS_gNB *gNB,
+diff --git a/openair1/SCHED_NR/phy_procedures_nr_gNB.c b/openair1/SCHED_NR/phy_procedures_nr_gNB.c
+index ead0b624f7..cf84f9213b 100644
+--- a/openair1/SCHED_NR/phy_procedures_nr_gNB.c
++++ b/openair1/SCHED_NR/phy_procedures_nr_gNB.c
+@@ -689,6 +689,14 @@ static void fill_ul_rb_mask(PHY_VARS_gNB *gNB,
+   for (int ULSCH_id = 0; ULSCH_id < gNB->max_nb_pusch; ULSCH_id++) {
+     NR_gNB_ULSCH_t *ulsch = &gNB->ulsch[ULSCH_id];
+     NR_UL_gNB_HARQ_t *ulsch_harq = ulsch->harq_process;
++    if (ulsch_harq == NULL) {
++      fprintf(stderr,
++              "[ULSCH-NULL] ULSCH_id=%d max_nb_pusch=%d ulsch=%p harq_pid=%d active=%d "
++              "rnti=0x%04x frame=%d slot=%d\n",
++              ULSCH_id, gNB->max_nb_pusch, (void *)ulsch, ulsch->harq_pid,
++              (int)ulsch->active, ulsch->rnti, ulsch->frame, ulsch->slot);
++      fflush(stderr);
++    }
+     AssertFatal(ulsch_harq != NULL, "harq_pid %d is not allocated\n", ulsch->harq_pid);
+     if (!(ulsch->active && ulsch->frame == frame_rx && ulsch->slot == slot_rx && !ulsch->handled))
+       continue;
+@@ -1071,6 +1079,14 @@ int phy_procedures_gNB_uespec_RX(PHY_VARS_gNB *gNB, int frame_rx, int slot_rx, N
+   for (int ULSCH_id = 0; ULSCH_id < gNB->max_nb_pusch; ULSCH_id++) {
+     NR_gNB_ULSCH_t *ulsch = &gNB->ulsch[ULSCH_id];
+     NR_UL_gNB_HARQ_t *ulsch_harq = ulsch->harq_process;
++    if (ulsch_harq == NULL) {
++      fprintf(stderr,
++              "[ULSCH-NULL] ULSCH_id=%d max_nb_pusch=%d ulsch=%p harq_pid=%d active=%d "
++              "rnti=0x%04x frame=%d slot=%d\n",
++              ULSCH_id, gNB->max_nb_pusch, (void *)ulsch, ulsch->harq_pid,
++              (int)ulsch->active, ulsch->rnti, ulsch->frame, ulsch->slot);
++      fflush(stderr);
++    }
+     AssertFatal(ulsch_harq != NULL, "harq_pid %d is not allocated\n", ulsch->harq_pid);
+     if (!(ulsch->active && ulsch->frame == frame_rx && ulsch->slot == slot_rx && !ulsch->handled))
+       continue;
 diff --git a/openair2/GNB_APP/RRC_nr_paramsvalues.h b/openair2/GNB_APP/RRC_nr_paramsvalues.h
 index 6ac8443581..d6ba1e8b1c 100644
 --- a/openair2/GNB_APP/RRC_nr_paramsvalues.h
@@ -711,3 +820,470 @@ index 6ac8443581..d6ba1e8b1c 100644
 +{GNB_CONFIG_STRING_MSGATRANSFORMPRECODER_R16,NULL,0,.lptr=(long*)scc->uplinkConfigCommon->initialUplinkBWP->ext1->msgA_ConfigCommon_r16->choice.setup->msgA_PUSCH_Config_r16->msgA_TransformPrecoder_r16,.deflongval=NR_MsgA_PUSCH_Config_r16__msgA_TransformPrecoder_r16_disabled,TYPE_LONG,0},\
 +{GNB_CONFIG_STRING_MSGACBPREAMBLESPERSHAREDRO_R16,NULL,0,.lptr=(long*)scc->uplinkConfigCommon->initialUplinkBWP->ext1->msgA_ConfigCommon_r16->choice.setup->rach_ConfigCommonTwoStepRA_r16.msgA_CB_PreamblesPerSSB_PerSharedRO_r16,.deflongval=1,TYPE_LONG,0}}
  #endif
+diff --git a/openair2/GNB_APP/gnb_config.c b/openair2/GNB_APP/gnb_config.c
+index f9e8261c0f..9af9d78927 100644
+--- a/openair2/GNB_APP/gnb_config.c
++++ b/openair2/GNB_APP/gnb_config.c
+@@ -28,6 +28,7 @@
+ */
+ 
+ #include "gnb_config.h"
++#include <inttypes.h>
+ #include <limits.h>
+ #include <math.h>
+ #include <stdbool.h>
+@@ -1164,7 +1165,7 @@ static f1ap_setup_req_t *RC_read_F1Setup(uint64_t id,
+   req->cell = calloc_or_fail(req->num_cells_available, sizeof(*req->cell));
+   req->cell[0].info = *info;
+   LOG_I(GNB_APP,
+-        "F1AP: gNB idx %d gNB_DU_id %ld, gNB_DU_name %s, TAC %d MCC/MNC/length %d/%d/%d cellID %ld\n",
++        "F1AP: gNB idx %d gNB_DU_id %" PRIu64 ", gNB_DU_name %s, TAC %d MCC/MNC/length %d/%d/%d cellID %" PRIu64 "\n",
+         0,
+         req->gNB_DU_id,
+         req->gNB_DU_name,
+@@ -1679,7 +1680,7 @@ void RCconfig_nr_macrlc(configmodule_interface_t *cfg)
+     seq_arr_t *du_SIBs = RC.nrmac[0]->common_channels[0].du_SIBs;
+     f1ap_setup_req_t *req = RC_read_F1Setup(gnb_du_id, name, &info, scc, mib, sib1, du_SIBs);
+     AssertFatal(req != NULL, "could not read F1 Setup information\n");
+-    LOG_I(GNB_APP, "Configured DU: cell ID %lu, PCI %d\n", info.nr_cellid, info.nr_pci);
++    LOG_I(GNB_APP, "Configured DU: cell ID %" PRIu64 ", PCI %d\n", info.nr_cellid, info.nr_pci);
+     RC.nrmac[0]->f1_config.setup_req = req;
+     RC.nrmac[0]->f1_config.gnb_id = gnb_id;
+ 
+diff --git a/openair2/LAYER2/NR_MAC_gNB/config.c b/openair2/LAYER2/NR_MAC_gNB/config.c
+index 005ad05720..863e394c9a 100644
+--- a/openair2/LAYER2/NR_MAC_gNB/config.c
++++ b/openair2/LAYER2/NR_MAC_gNB/config.c
+@@ -31,6 +31,7 @@
+  */
+ 
+ #include <complex.h>
++#include <inttypes.h>
+ #include <math.h>
+ #include <stdbool.h>
+ #include <stdint.h>
+@@ -737,9 +738,9 @@ static void config_common(gNB_MAC_INST *nrmac, const nr_mac_config_t *config, NR
+                     cfg->ssb_table.ssb_subcarrier_offset.value;
+     if (cfg->carrier_config.dl_frequency.value != cfg->carrier_config.uplink_frequency.value) {
+       LOG_I(NR_MAC,
+-            "Command line parameters for OAI UE: -C %lu --CO %ld -r %d --numerology %d --band %ld --ssb %d %s\n",
++            "Command line parameters for OAI UE: -C %" PRIu64 " --CO %" PRId64 " -r %d --numerology %d --band %ld --ssb %d %s\n",
+             carr_dl,
+-            carr_ul - carr_dl,
++            (int64_t)(carr_ul - carr_dl),
+             bw,
+             mu,
+             band,
+@@ -747,7 +748,7 @@ static void config_common(gNB_MAC_INST *nrmac, const nr_mac_config_t *config, NR
+             get_softmodem_params()->threequarter_fs ? "-E" : "");
+     } else {
+       LOG_I(NR_MAC,
+-            "Command line parameters for OAI UE: -C %lu -r %d --numerology %d --band %ld --ssb %d %s\n",
++            "Command line parameters for OAI UE: -C %" PRIu64 " -r %d --numerology %d --band %ld --ssb %d %s\n",
+             carr_dl,
+             bw,
+             mu,
+diff --git a/openair2/LAYER2/NR_MAC_gNB/nr_radio_config.c b/openair2/LAYER2/NR_MAC_gNB/nr_radio_config.c
+index 623e8514c0..91f162ded6 100644
+--- a/openair2/LAYER2/NR_MAC_gNB/nr_radio_config.c
++++ b/openair2/LAYER2/NR_MAC_gNB/nr_radio_config.c
+@@ -2738,7 +2738,7 @@ NR_BCCH_DL_SCH_Message_t *get_SIB1_NR(const NR_ServingCellConfigCommon_t *scc,
+                                       int tac,
+                                       const nr_mac_config_t *mac_config)
+ {
+-  AssertFatal(cellID < (1l << 36), "cellID must fit within 36 bits, but is %lu\n", cellID);
++  AssertFatal(cellID < ((uint64_t)1 << 36), "cellID must fit within 36 bits, but is %" PRIu64 "\n", cellID);
+ 
+   NR_BCCH_DL_SCH_Message_t *sib1_message = CALLOC(1,sizeof(NR_BCCH_DL_SCH_Message_t));
+   AssertFatal(sib1_message != NULL, "out of memory\n");
+@@ -2822,7 +2822,6 @@ NR_BCCH_DL_SCH_Message_t *get_SIB1_NR(const NR_ServingCellConfigCommon_t *scc,
+   LOG_I(NR_RRC,
+ 	"SIB1 freq: offsetToPointA %d\n",
+         (int)sib1->servingCellConfigCommon->downlinkConfigCommon.frequencyInfoDL.offsetToPointA);
+-  
+   for (int i = 0; i < frequencyInfoDL->scs_SpecificCarrierList.list.count; i++) {
+     const NR_SCS_SpecificCarrier_t *orig = frequencyInfoDL->scs_SpecificCarrierList.list.array[i];
+     NR_SCS_SpecificCarrier_t *new = NULL;
+diff --git a/openair2/RRC/NR/rrc_gNB_du.c b/openair2/RRC/NR/rrc_gNB_du.c
+index 3381d60ce5..7a37258047 100644
+--- a/openair2/RRC/NR/rrc_gNB_du.c
++++ b/openair2/RRC/NR/rrc_gNB_du.c
+@@ -21,6 +21,7 @@
+ 
+ #include "rrc_gNB_du.h"
+ #include "rrc_cell_management.h"
++#include <inttypes.h>
+ #include <stdbool.h>
+ #include <stdlib.h>
+ #include <string.h>
+@@ -89,7 +90,7 @@ int get_ssb_arfcn(const struct nr_rrc_cell_container_t *cell)
+   DevAssert(cell != NULL);
+   if (cell->mtc != NULL)
+     return ssb_arfcn_mtc(cell->mtc);
+-  AssertFatal(false, "no mtc found for cell %ld\n", cell->info.cell_id);
++  AssertFatal(false, "no mtc found for cell %" PRId64 "\n", cell->info.cell_id);
+   return 0;
+ }
+ 
+@@ -186,7 +187,7 @@ static void is_intra_frequency_neighbour(void *ssb_arfcn, void *neighbour_cell)
+   nr_neighbour_cell_t *neighbour_cell_ptr = (nr_neighbour_cell_t *)neighbour_cell;
+ 
+   if (*ssb_arfcn_ptr == neighbour_cell_ptr->absoluteFrequencySSB) {
+-    LOG_D(NR_RRC, "HO LOG: found intra frequency neighbour %lu!\n", neighbour_cell_ptr->nrcell_id);
++    LOG_D(NR_RRC, "HO LOG: found intra frequency neighbour %" PRIu64 "!\n", neighbour_cell_ptr->nrcell_id);
+     neighbour_cell_ptr->isIntraFrequencyNeighbour = true;
+   }
+ }
+@@ -231,11 +232,11 @@ static bool valid_du_in_neighbour_configs(const seq_arr_t *neighbour_cell_config
+         continue;
+       // current cell is in the nc config, check that config matches
+       if (nc->physicalCellId != cell->nr_pci) {
+-        LOG_W(NR_RRC, "Cell %ld in neighbour config: PCI mismatch (%d vs %d)\n", cell->nr_cellid, cell->nr_pci, nc->physicalCellId);
++        LOG_W(NR_RRC, "Cell %" PRId64 " in neighbour config: PCI mismatch (%d vs %d)\n", cell->nr_cellid, cell->nr_pci, nc->physicalCellId);
+         return false;
+       }
+       if (cell->tac && nc->tac != *cell->tac) {
+-        LOG_W(NR_RRC, "Cell %ld in neighbour config: TAC mismatch (%d vs %d)\n", cell->nr_cellid, *cell->tac, nc->tac);
++        LOG_W(NR_RRC, "Cell %" PRId64 " in neighbour config: TAC mismatch (%d vs %d)\n", cell->nr_cellid, *cell->tac, nc->tac);
+         return false;
+       }
+       if (ssb_arfcn != nc->absoluteFrequencySSB) {
+@@ -248,7 +249,7 @@ static bool valid_du_in_neighbour_configs(const seq_arr_t *neighbour_cell_config
+       }
+       // Check neighbour band
+       if (get_dl_band(cell) != nc->band) {
+-        LOG_W(NR_RRC, "Cell %ld in neighbour config: Band mismatch (%d vs %d)\n", cell->nr_cellid, get_dl_band(cell), nc->band);
++        LOG_W(NR_RRC, "Cell %" PRId64 " in neighbour config: Band mismatch (%d vs %d)\n", cell->nr_cellid, get_dl_band(cell), nc->band);
+         return false;
+       }
+       if (get_ssb_scs(cell) != nc->subcarrierSpacing) {
+@@ -272,7 +273,7 @@ static bool valid_du_in_neighbour_configs(const seq_arr_t *neighbour_cell_config
+               nc->plmn.mnc);
+         return false;
+       }
+-      LOG_D(NR_RRC, "Cell %ld is neighbor of cell %ld\n", cell->nr_cellid, neighbour_config->nr_cell_id);
++      LOG_D(NR_RRC, "Cell %" PRId64 " is neighbor of cell %" PRId64 "\n", cell->nr_cellid, neighbour_config->nr_cell_id);
+     }
+   }
+   return true;
+@@ -322,7 +323,7 @@ void rrc_gNB_process_f1_setup_req(f1ap_setup_req_t *req, sctp_assoc_t assoc_id)
+   gNB_RRC_INST *rrc = RC.nrrrc[0];
+   DevAssert(rrc);
+ 
+-  LOG_I(NR_RRC, "Received F1 Setup Request from gNB_DU %lu (%s) on assoc_id %d\n", req->gNB_DU_id, req->gNB_DU_name, assoc_id);
++  LOG_I(NR_RRC, "Received F1 Setup Request from gNB_DU %" PRIu64 " (%s) on assoc_id %d\n", req->gNB_DU_id, req->gNB_DU_name, assoc_id);
+   // pre-fill F1 Setup Failure message
+   f1ap_setup_failure_t fail = {.transaction_id = F1AP_get_next_transaction_identifier(0, 0)};
+ 
+@@ -343,7 +344,7 @@ void rrc_gNB_process_f1_setup_req(f1ap_setup_req_t *req, sctp_assoc_t assoc_id)
+       return;
+     }
+   }
+-  LOG_I(NR_RRC, "Accepting DU %ld (%s) (RRC version %u.%u.%u)\n", req->gNB_DU_id, req->gNB_DU_name, req->rrc_ver[0], req->rrc_ver[1], req->rrc_ver[2]);
++  LOG_I(NR_RRC, "Accepting DU %" PRId64 " (%s) (RRC version %u.%u.%u)\n", req->gNB_DU_id, req->gNB_DU_name, req->rrc_ver[0], req->rrc_ver[1], req->rrc_ver[2]);
+ 
+   // DU is accepted, add it to tree and add cell to DU's cell array
+   nr_rrc_du_container_t *du = calloc_or_fail(1, sizeof(*du));
+@@ -387,7 +388,7 @@ void rrc_gNB_process_f1_setup_req(f1ap_setup_req_t *req, sctp_assoc_t assoc_id)
+     }
+ 
+     if (rrc->neighbour_cell_configuration && !valid_du_in_neighbour_configs(rrc->neighbour_cell_configuration, cell_info)) {
+-      LOG_E(NR_RRC, "problem with DU %ld in neighbor configuration, rejecting DU\n", req->gNB_DU_id);
++      LOG_E(NR_RRC, "problem with DU %" PRId64 " in neighbor configuration, rejecting DU\n", req->gNB_DU_id);
+       f1ap_setup_failure_t fail = {.cause = F1AP_CauseMisc_unspecified};
+       rrc->mac_rrc.f1_setup_failure(assoc_id, &fail);
+       free_f1ap_setup_response(&resp);
+@@ -399,7 +400,7 @@ void rrc_gNB_process_f1_setup_req(f1ap_setup_req_t *req, sctp_assoc_t assoc_id)
+     NR_SIB1_t *sib1 = NULL;
+     if (sys_info != NULL && sys_info->mib != NULL && !(sys_info->sib1 == NULL && IS_SA_MODE(get_softmodem_params()))) {
+       if (!extract_sys_info(sys_info, &mib, &sib1)) {
+-        LOG_W(NR_RRC, "rejecting DU ID %ld\n", req->gNB_DU_id);
++        LOG_W(NR_RRC, "rejecting DU ID %" PRId64 "\n", req->gNB_DU_id);
+         fail.cause = F1AP_CauseProtocol_semantic_error;
+         rrc->mac_rrc.f1_setup_failure(assoc_id, &fail);
+         free_f1ap_setup_response(&resp);
+@@ -431,8 +432,8 @@ void rrc_gNB_process_f1_setup_req(f1ap_setup_req_t *req, sctp_assoc_t assoc_id)
+     }
+ 
+     nr_rrc_cell_container_t *added = rrc_add_cell_to_du(&du->cells, new);
+-    AssertFatal(added != NULL, "Failed to add cell %ld to DU %ld\n", new->info.cell_id, du->gNB_DU_id);
+-    LOG_I(NR_RRC, "DU %ld: Added cell %ld\n", du->gNB_DU_id, new->info.cell_id);
++    AssertFatal(added != NULL, "Failed to add cell %" PRId64 " to DU %" PRId64 "\n", new->info.cell_id, du->gNB_DU_id);
++    LOG_I(NR_RRC, "DU %" PRId64 ": Added cell %" PRId64 "\n", du->gNB_DU_id, new->info.cell_id);
+ 
+     served_cells_to_activate_t cell = {
+         .plmn = cell_info->plmn,
+@@ -467,7 +468,7 @@ void rrc_gNB_process_f1_setup_req(f1ap_setup_req_t *req, sctp_assoc_t assoc_id)
+     resp.cells_to_activate[i] = cell;
+   }
+ 
+-  LOG_I(NR_RRC, "DU %ld (%s): sending F1 Setup Response\n", req->gNB_DU_id, req->gNB_DU_name);
++  LOG_I(NR_RRC, "DU %" PRId64 " (%s): sending F1 Setup Response\n", req->gNB_DU_id, req->gNB_DU_name);
+   rrc->mac_rrc.f1_setup_response(assoc_id, &resp);
+   free_f1ap_setup_response(&resp);
+ 
+@@ -536,7 +537,7 @@ static nr_rrc_cell_container_t *update_cell_info(gNB_RRC_INST *rrc, const uint64
+   // Find the cell by old cell_id from the update message
+   nr_rrc_cell_container_t *cell = get_cell_by_cell_id(cells, old_nci);
+   if (cell == NULL) {
+-    LOG_W(NR_RRC, "no cell with ID %ld found, ignoring gNB-DU configuration update\n", old_nci);
++    LOG_W(NR_RRC, "no cell with ID %" PRId64 " found, ignoring gNB-DU configuration update\n", old_nci);
+     return NULL;
+   }
+ 
+@@ -565,12 +566,12 @@ static nr_rrc_cell_container_t *update_cell_info(gNB_RRC_INST *rrc, const uint64
+     // Check if new cell_id would create a duplicate (excluding current cell)
+     nr_rrc_cell_container_t *existing = get_cell_by_cell_id(cells, new_ci->nr_cellid);
+     if (existing != NULL && existing != cell) {
+-      LOG_E(NR_RRC, "Cannot change cell_id from %ld to %ld: new cell_id already exists\n", old_nci, new_ci->nr_cellid);
++      LOG_E(NR_RRC, "Cannot change cell_id from %" PRId64 " to %" PRId64 ": new cell_id already exists\n", old_nci, new_ci->nr_cellid);
+       return NULL;
+     }
+     // Remove from tree before updating cell_id
+     nr_rrc_cell_container_t *removed = RB_REMOVE(rrc_cell_tree, cells, cell);
+-    AssertFatal(removed == cell, "Failed to remove cell %ld from tree\n", old_nci);
++    AssertFatal(removed == cell, "Failed to remove cell %" PRId64 " from tree\n", old_nci);
+   }
+ 
+   // Free old MTC before updating
+@@ -583,8 +584,8 @@ static nr_rrc_cell_container_t *update_cell_info(gNB_RRC_INST *rrc, const uint64
+   // If cell_id changed, re-insert into tree with new cell_id
+   if (cell_id_changed) {
+     nr_rrc_cell_container_t *existing = RB_INSERT(rrc_cell_tree, cells, cell);
+-    AssertFatal(existing == NULL, "Failed to insert cell %ld into tree\n", cell->info.cell_id);
+-    LOG_I(NR_RRC, "Updated cell_id from %ld to %ld\n", old_nci, cell->info.cell_id);
++    AssertFatal(existing == NULL, "Failed to insert cell %" PRId64 " into tree\n", cell->info.cell_id);
++    LOG_I(NR_RRC, "Updated cell_id from %" PRId64 " to %" PRId64 "\n", old_nci, cell->info.cell_id);
+   }
+ 
+   return cell;
+@@ -647,7 +648,7 @@ void rrc_gNB_process_f1_du_configuration_update(f1ap_gnb_du_configuration_update
+ 
+     nr_rrc_cell_container_t *cell = update_cell_info(rrc, old_nci, new_ci);
+     if (cell == NULL) {
+-      LOG_W(NR_RRC, "Failed to update cell %ld, ignoring gNB-DU configuration update\n", old_nci);
++      LOG_W(NR_RRC, "Failed to update cell %" PRId64 ", ignoring gNB-DU configuration update\n", old_nci);
+       return;
+     }
+     if (cell->assoc_id != du->assoc_id) {
+@@ -672,11 +673,11 @@ void rrc_gNB_process_f1_du_configuration_update(f1ap_gnb_du_configuration_update
+ 
+       NR_MIB_t *mib = NULL;
+       if (!extract_sys_info(sys_info, &mib, &cell->sib1)) {
+-        LOG_W(NR_RRC, "cannot update sys_info for DU %ld\n", du->gNB_DU_id);
++        LOG_W(NR_RRC, "cannot update sys_info for DU %" PRId64 "\n", du->gNB_DU_id);
+       } else {
+         DevAssert(mib != NULL);
+         cell->mib = mib;
+-        LOG_I(NR_RRC, "update system information of DU %ld\n", du->gNB_DU_id);
++        LOG_I(NR_RRC, "update system information of DU %" PRId64 "\n", du->gNB_DU_id);
+       }
+     }
+ 
+@@ -694,7 +695,7 @@ void rrc_gNB_process_f1_du_configuration_update(f1ap_gnb_du_configuration_update
+     const f1ap_cell_status_t *cs = &conf_up->status[i];
+     const char *status = cs->service_state == F1AP_STATE_IN_SERVICE ? "in service" : "out of service";
+     const plmn_id_t *p = &cs->plmn;
+-    LOG_I(NR_RRC, "cell PLMN %03d.%0*d Cell ID %ld is %s\n", p->mcc, p->mnc_digit_length, p->mnc, cs->nr_cellid, status);
++    LOG_I(NR_RRC, "cell PLMN %03d.%0*d Cell ID %" PRId64 " is %s\n", p->mcc, p->mnc_digit_length, p->mnc, cs->nr_cellid, status);
+   }
+ 
+   /* Send DU Configuration Acknowledgement */
+@@ -738,12 +739,12 @@ nr_rrc_du_container_t *get_du_for_ue(gNB_RRC_INST *rrc, uint32_t ue_id)
+  * @note Called periodically (every 1 second) for stats logging */
+ void dump_du_info(const gNB_RRC_INST *rrc, FILE *f)
+ {
+-  fprintf(f, "%ld connected DUs \n", rrc->num_dus);
++  fprintf(f, "%" PRId64 " connected DUs \n", rrc->num_dus);
+   int du_idx = 1;
+   nr_rrc_du_container_t *du = NULL;
+   /* cast is necessary to eliminate warning "discards 'const' qualifier" */
+   RB_FOREACH(du, rrc_du_tree, &((gNB_RRC_INST *)rrc)->dus) {
+-    fprintf(f, "[%d] DU ID %ld (%s) ", du_idx++, du->gNB_DU_id, du->gNB_DU_name);
++    fprintf(f, "[%d] DU ID %" PRId64 " (%s) ", du_idx++, du->gNB_DU_id, du->gNB_DU_name);
+     if (du->assoc_id == -1) {
+       fprintf(f, "integrated DU-CU");
+     } else {
+@@ -762,7 +763,7 @@ void dump_du_info(const gNB_RRC_INST *rrc, FILE *f)
+         nr_rrc_cell_container_t *cell = *cell_ptr;
+         const char *mode = (cell->info.mode == NR_MODE_TDD) ? "TDD" : "FDD";
+         fprintf(f,
+-                "  [%d] nrCellID %lu, PCI %d, Mode %s, SSB ARFCN %d\n",
++                "  [%d] nrCellID %" PRIu64 ", PCI %d, Mode %s, SSB ARFCN %d\n",
+                 cell_idx++,
+                 cell->info.cell_id,
+                 cell->info.pci,
+diff --git a/openair3/NGAP/ngap_common.c b/openair3/NGAP/ngap_common.c
+index 8be57349ec..84109a2a7a 100644
+--- a/openair3/NGAP/ngap_common.c
++++ b/openair3/NGAP/ngap_common.c
+@@ -116,8 +116,11 @@ nr_guami_t decode_ngap_guami(const NGAP_GUAMI_t *in)
+ ngap_ambr_t decode_ngap_UEAggregateMaximumBitRate(const NGAP_UEAggregateMaximumBitRate_t *in)
+ {
+   ngap_ambr_t ambr = {0};
+-  asn_INTEGER2ulong(&in->uEAggregateMaximumBitRateUL, &ambr.br_ul);
+-  asn_INTEGER2ulong(&in->uEAggregateMaximumBitRateDL, &ambr.br_dl);
++  /* bitrate_t is uint64_t; asn_INTEGER2ulong on armhf only writes 4 bytes,
++   * leaving the upper 4 as stack garbage. NGAP BitRate is up to 4 Tbps (42 bits)
++   * so always use the explicit 64-bit decoder. */
++  asn_INTEGER2uint64(&in->uEAggregateMaximumBitRateUL, &ambr.br_ul);
++  asn_INTEGER2uint64(&in->uEAggregateMaximumBitRateDL, &ambr.br_dl);
+   return ambr;
+ }
+ 
+diff --git a/openair3/NGAP/ngap_gNB_encoder.c b/openair3/NGAP/ngap_gNB_encoder.c
+index ff318ed184..05e1e8f003 100644
+--- a/openair3/NGAP/ngap_gNB_encoder.c
++++ b/openair3/NGAP/ngap_gNB_encoder.c
+@@ -67,6 +67,13 @@ static inline int ngap_gNB_encode_initiating(NGAP_NGAP_PDU_t *pdu, uint8_t **buf
+   }
+ 
+   asn_encode_to_new_buffer_result_t res = asn_encode_to_new_buffer(NULL, ATS_ALIGNED_CANONICAL_PER, &asn_DEF_NGAP_NGAP_PDU, pdu);
++  if (res.result.encoded <= 0) {
++    fprintf(stderr, "[NGAP-ENC-FAIL] initiating procedureCode=%d encoded=%ld failed_type=%s\n",
++            (int)pdu->choice.initiatingMessage->procedureCode,
++            (long)res.result.encoded,
++            res.result.failed_type ? res.result.failed_type->name : "(null)");
++    fflush(stderr);
++  }
+   AssertFatal(res.result.encoded > 0, "failed to encode NGAP msg\n");
+   *buffer = res.buffer;
+   *len = res.result.encoded;
+diff --git a/openair3/NGAP/ngap_gNB_handlers.c b/openair3/NGAP/ngap_gNB_handlers.c
+index 292ab1635d..ab429e946f 100644
+--- a/openair3/NGAP/ngap_gNB_handlers.c
++++ b/openair3/NGAP/ngap_gNB_handlers.c
+@@ -345,7 +345,7 @@ static int ngap_gNB_handle_error_indication(sctp_assoc_t assoc_id, uint32_t stre
+ 
+   /* optional */
+   if (ie != NULL) {
+-    asn_INTEGER2ulong(&(ie->value.choice.AMF_UE_NGAP_ID), &amf_ue_ngap_id);
++    asn_INTEGER2uint64(&(ie->value.choice.AMF_UE_NGAP_ID), &amf_ue_ngap_id);
+     NGAP_WARN("Received NG Error indication AMF UE NGAP ID 0x%lx\n", amf_ue_ngap_id);
+   }
+ 
+@@ -751,7 +751,7 @@ static int ngap_gNB_handle_initial_context_request(sctp_assoc_t assoc_id, uint32
+   NGAP_FIND_PROTOCOLIE_BY_ID(NGAP_InitialContextSetupRequestIEs_t, ie, container,
+                              NGAP_ProtocolIE_ID_id_AMF_UE_NGAP_ID, true);
+ 
+-  asn_INTEGER2ulong(&(ie->value.choice.AMF_UE_NGAP_ID), &amf_ue_ngap_id);
++  asn_INTEGER2uint64(&(ie->value.choice.AMF_UE_NGAP_ID), &amf_ue_ngap_id);
+ 
+   /* id-RAN-UE-NGAP-ID */
+   NGAP_FIND_PROTOCOLIE_BY_ID(NGAP_InitialContextSetupRequestIEs_t, ie, container,
+@@ -880,7 +880,7 @@ static int ngap_gNB_handle_ue_context_release_command(sctp_assoc_t assoc_id, uin
+   switch (ie->value.choice.UE_NGAP_IDs.present) {
+     case NGAP_UE_NGAP_IDs_PR_uE_NGAP_ID_pair:
+       gnb_ue_ngap_id = ie->value.choice.UE_NGAP_IDs.choice.uE_NGAP_ID_pair->rAN_UE_NGAP_ID;
+-      asn_INTEGER2ulong(&(ie->value.choice.UE_NGAP_IDs.choice.uE_NGAP_ID_pair->aMF_UE_NGAP_ID), &amf_ue_ngap_id);
++      asn_INTEGER2uint64(&(ie->value.choice.UE_NGAP_IDs.choice.uE_NGAP_ID_pair->aMF_UE_NGAP_ID), &amf_ue_ngap_id);
+       ngap_gNB_ue_context_t *ue_desc_p = ngap_get_ue_context(gnb_ue_ngap_id);
+       if (!ue_desc_p) {
+         NGAP_ERROR(
+@@ -906,7 +906,7 @@ static int ngap_gNB_handle_ue_context_release_command(sctp_assoc_t assoc_id, uin
+       //#warning "TODO mapping amf_ue_ngap_id  gnb_ue_ngap_id?"
+ 
+     case NGAP_UE_NGAP_IDs_PR_aMF_UE_NGAP_ID:
+-      asn_INTEGER2ulong(&(ie->value.choice.UE_NGAP_IDs.choice.aMF_UE_NGAP_ID), &amf_ue_ngap_id);
++      asn_INTEGER2uint64(&(ie->value.choice.UE_NGAP_IDs.choice.aMF_UE_NGAP_ID), &amf_ue_ngap_id);
+       NGAP_ERROR("TO DO mapping amf_ue_ngap_id  gnb_ue_ngap_id");
+       (void)amf_ue_ngap_id; /* TODO: remove - it's to remove gcc warning about unused var */
+ 
+@@ -943,7 +943,7 @@ static int ngap_gNB_handle_pdusession_setup_request(sctp_assoc_t assoc_id, uint3
+ 
+   /* id-AMF-UE-NGAP-ID */
+   NGAP_FIND_PROTOCOLIE_BY_ID(NGAP_PDUSessionResourceSetupRequestIEs_t, ie, container, NGAP_ProtocolIE_ID_id_AMF_UE_NGAP_ID, true);
+-  asn_INTEGER2ulong(&(ie->value.choice.AMF_UE_NGAP_ID), &amf_ue_ngap_id);
++  asn_INTEGER2uint64(&(ie->value.choice.AMF_UE_NGAP_ID), &amf_ue_ngap_id);
+ 
+   /* id-gNB-UE-NGAP-ID */
+   NGAP_FIND_PROTOCOLIE_BY_ID(NGAP_PDUSessionResourceSetupRequestIEs_t, ie, container, NGAP_ProtocolIE_ID_id_RAN_UE_NGAP_ID, true);
+@@ -1244,7 +1244,7 @@ static int ngap_gNB_handle_pdusession_modify_request(sctp_assoc_t assoc_id, uint
+                              NGAP_ProtocolIE_ID_id_AMF_UE_NGAP_ID, true);
+ 
+   if (ie != NULL) { /* checked by macro but cppcheck doesn't see it */
+-    asn_INTEGER2ulong(&(ie->value.choice.AMF_UE_NGAP_ID), &amf_ue_ngap_id);
++    asn_INTEGER2uint64(&(ie->value.choice.AMF_UE_NGAP_ID), &amf_ue_ngap_id);
+   } else {
+     return -1;
+   }
+@@ -1342,7 +1342,7 @@ static int ngap_gNB_handle_pdusession_release_command(sctp_assoc_t assoc_id, uin
+                              NGAP_ProtocolIE_ID_id_AMF_UE_NGAP_ID, true);
+ 
+   if (ie != NULL) { /* checked by macro but cppcheck doesn't see it */
+-    asn_INTEGER2ulong(&(ie->value.choice.AMF_UE_NGAP_ID), &amf_ue_ngap_id);
++    asn_INTEGER2uint64(&(ie->value.choice.AMF_UE_NGAP_ID), &amf_ue_ngap_id);
+   } else {
+     return -1;
+   }
+@@ -1450,7 +1450,7 @@ static int ngap_gNB_handle_dl_ran_status_transfer(sctp_assoc_t assoc_id, uint32_
+   // AMF UE NGAP ID
+   uint64_t amf_ue_ngap_id = 0;
+   NGAP_FIND_PROTOCOLIE_BY_ID(NGAP_DownlinkRANStatusTransferIEs_t, ie, container, NGAP_ProtocolIE_ID_id_AMF_UE_NGAP_ID, true);
+-  asn_INTEGER2ulong(&ie->value.choice.AMF_UE_NGAP_ID, &amf_ue_ngap_id);
++  asn_INTEGER2uint64(&ie->value.choice.AMF_UE_NGAP_ID, &amf_ue_ngap_id);
+ 
+   // RAN UE NGAP ID
+   NGAP_FIND_PROTOCOLIE_BY_ID(NGAP_DownlinkRANStatusTransferIEs_t, ie, container, NGAP_ProtocolIE_ID_id_RAN_UE_NGAP_ID, true);
+diff --git a/openair3/NGAP/ngap_gNB_mobility_management.c b/openair3/NGAP/ngap_gNB_mobility_management.c
+index 95290f7bc3..2465e05894 100644
+--- a/openair3/NGAP/ngap_gNB_mobility_management.c
++++ b/openair3/NGAP/ngap_gNB_mobility_management.c
+@@ -252,7 +252,7 @@ int decode_ng_handover_request(ngap_handover_request_t *out, const NGAP_NGAP_PDU
+ 
+   // AMF UE NGAP ID (M)
+   NGAP_FIND_PROTOCOLIE_BY_ID(NGAP_HandoverRequestIEs_t, ie, container, NGAP_ProtocolIE_ID_id_AMF_UE_NGAP_ID, true);
+-  asn_INTEGER2ulong(&(ie->value.choice.AMF_UE_NGAP_ID), &out->amf_ue_ngap_id);
++  asn_INTEGER2uint64(&(ie->value.choice.AMF_UE_NGAP_ID), &out->amf_ue_ngap_id);
+ 
+   // GUAMI (M)
+   NGAP_FIND_PROTOCOLIE_BY_ID(NGAP_HandoverRequestIEs_t, ie, container, NGAP_ProtocolIE_ID_id_GUAMI, true);
+@@ -484,7 +484,7 @@ int decode_ng_handover_command(ngap_handover_command_t *msg, NGAP_NGAP_PDU_t *pd
+ 
+   // AMF UE NGAP ID (M)
+   NGAP_FIND_PROTOCOLIE_BY_ID(NGAP_HandoverCommandIEs_t, ie, container, NGAP_ProtocolIE_ID_id_AMF_UE_NGAP_ID, true);
+-  asn_INTEGER2ulong(&(ie->value.choice.AMF_UE_NGAP_ID), &msg->amf_ue_ngap_id);
++  asn_INTEGER2uint64(&(ie->value.choice.AMF_UE_NGAP_ID), &msg->amf_ue_ngap_id);
+ 
+   // RAN UE NGAP ID (M)
+   NGAP_FIND_PROTOCOLIE_BY_ID(NGAP_HandoverCommandIEs_t, ie, container, NGAP_ProtocolIE_ID_id_RAN_UE_NGAP_ID, true);
+@@ -670,7 +670,7 @@ int decode_ng_handover_cancel_ack(ngap_handover_cancel_ack_t *out, const NGAP_NG
+ 
+   /* AMF UE NGAP ID (M) */
+   NGAP_FIND_PROTOCOLIE_BY_ID(NGAP_HandoverCancelAcknowledgeIEs_t, ie, container, NGAP_ProtocolIE_ID_id_AMF_UE_NGAP_ID, true);
+-  asn_INTEGER2ulong(&ie->value.choice.AMF_UE_NGAP_ID, &out->amf_ue_ngap_id);
++  asn_INTEGER2uint64(&ie->value.choice.AMF_UE_NGAP_ID, &out->amf_ue_ngap_id);
+ 
+   /* RAN UE NGAP ID (M) */
+   NGAP_FIND_PROTOCOLIE_BY_ID(NGAP_HandoverCancelAcknowledgeIEs_t, ie, container, NGAP_ProtocolIE_ID_id_RAN_UE_NGAP_ID, true);
+diff --git a/openair3/NGAP/ngap_gNB_nas_procedures.c b/openair3/NGAP/ngap_gNB_nas_procedures.c
+index 8a2cfeead5..c0c5b0be45 100644
+--- a/openair3/NGAP/ngap_gNB_nas_procedures.c
++++ b/openair3/NGAP/ngap_gNB_nas_procedures.c
+@@ -323,7 +323,11 @@ int ngap_gNB_handle_nas_downlink(sctp_assoc_t assoc_id, uint32_t stream, NGAP_NG
+   container = &pdu->choice.initiatingMessage->value.choice.DownlinkNASTransport;
+   NGAP_FIND_PROTOCOLIE_BY_ID(NGAP_DownlinkNASTransport_IEs_t, ie, container,
+                              NGAP_ProtocolIE_ID_id_AMF_UE_NGAP_ID, true);
+-  asn_INTEGER2ulong(&(ie->value.choice.AMF_UE_NGAP_ID), &amf_ue_ngap_id);
++  amf_ue_ngap_id = 0;
++  asn_INTEGER2uint64(&(ie->value.choice.AMF_UE_NGAP_ID), &amf_ue_ngap_id);
++  fprintf(stderr, "[NGAP-DL-DBG] decoded amf_ue_ngap_id=%llu raw_size=%d\n",
++          (unsigned long long)amf_ue_ngap_id, (int)ie->value.choice.AMF_UE_NGAP_ID.size);
++  fflush(stderr);
+ 
+ 
+   NGAP_FIND_PROTOCOLIE_BY_ID(NGAP_DownlinkNASTransport_IEs_t, ie, container,
+@@ -894,6 +898,13 @@ int ngap_gNB_ue_capabilities(instance_t instance, ngap_ue_cap_info_ind_t *ue_cap
+     ie->value.present = NGAP_UERadioCapabilityInfoIndicationIEs__value_PR_UERadioCapability;
+     ie->value.choice.UERadioCapability.buf = ue_cap_info_ind_p->ue_radio_cap.buf;
+     ie->value.choice.UERadioCapability.size = ue_cap_info_ind_p->ue_radio_cap.len;
++    fprintf(stderr, "[NGAP-CAP-DBG] amf_ue=%llu ran_ue=%lu buf=%p len=%zu size=%d\n",
++            (unsigned long long)ue_context_p->amf_ue_ngap_id,
++            (unsigned long)ue_cap_info_ind_p->gNB_ue_ngap_id,
++            ue_cap_info_ind_p->ue_radio_cap.buf,
++            ue_cap_info_ind_p->ue_radio_cap.len,
++            (int)ie->value.choice.UERadioCapability.size);
++    fflush(stderr);
+   }
+   /* optional */
+   //NGAP_UERadioCapabilityForPaging TBD
