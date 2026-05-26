@@ -513,6 +513,26 @@ index 0f22900d72..21b3f6c514 100644
    }
  
    // this is number of quadwords in the bit string
+diff --git a/openair1/PHY/INIT/nr_init.c b/openair1/PHY/INIT/nr_init.c
+index 1615fc86f3..1497ecd898 100644
+--- a/openair1/PHY/INIT/nr_init.c
++++ b/openair1/PHY/INIT/nr_init.c
+@@ -387,6 +387,15 @@ void nr_phy_config_request(NR_PHY_Config_t *phy_config)
+ 
+   fd_occasion = 0;
+   nfapi_nr_prach_config_t *prach_config = &gNB_config->prach_config;
++  fprintf(stderr, "[PRACH-CFG-DBG] prach_sequence_length tag=0x%x value=%u "
++                  "prach_ConfigurationIndex=%u prach_sub_c_spacing=%u "
++                  "num_prach_fd_occasions=%u\n",
++          prach_config->prach_sequence_length.tl.tag,
++          prach_config->prach_sequence_length.value,
++          prach_config->prach_ConfigurationIndex.value,
++          prach_config->prach_sub_c_spacing.value,
++          prach_config->num_prach_fd_occasions.value);
++  fflush(stderr);
+   short_sequence = prach_config->prach_sequence_length.value;
+ //  for(fd_occasion = 0; fd_occasion <= prach_config->num_prach_fd_occasions.value ; fd_occasion) { // TODO Need to handle for msg1-fdm > 1
+   num_sequences = prach_config->num_prach_fd_occasions_list[fd_occasion].num_root_sequences.value;
 diff --git a/openair1/PHY/MODULATION/nr_modulation.c b/openair1/PHY/MODULATION/nr_modulation.c
 index 562c43895b..84c06c1894 100644
 --- a/openair1/PHY/MODULATION/nr_modulation.c
@@ -851,7 +871,7 @@ index f9e8261c0f..9af9d78927 100644
      RC.nrmac[0]->f1_config.gnb_id = gnb_id;
  
 diff --git a/openair2/LAYER2/NR_MAC_gNB/config.c b/openair2/LAYER2/NR_MAC_gNB/config.c
-index 005ad05720..863e394c9a 100644
+index 005ad05720..9764bdcdb7 100644
 --- a/openair2/LAYER2/NR_MAC_gNB/config.c
 +++ b/openair2/LAYER2/NR_MAC_gNB/config.c
 @@ -31,6 +31,7 @@
@@ -862,7 +882,19 @@ index 005ad05720..863e394c9a 100644
  #include <math.h>
  #include <stdbool.h>
  #include <stdint.h>
-@@ -737,9 +738,9 @@ static void config_common(gNB_MAC_INST *nrmac, const nr_mac_config_t *config, NR
+@@ -497,6 +498,11 @@ static void config_common(gNB_MAC_INST *nrmac, const nr_mac_config_t *config, NR
+ 
+   cfg->prach_config.prach_sequence_length.value = rach_ConfigCommon->prach_RootSequenceIndex.present - 1;
+   cfg->prach_config.prach_sequence_length.tl.tag = NFAPI_NR_CONFIG_PRACH_SEQUENCE_LENGTH_TAG;
++  fprintf(stderr, "[PRACH-VNF-DBG] present=%d value=%u prach_ConfigIdx=%ld\n",
++          (int)rach_ConfigCommon->prach_RootSequenceIndex.present,
++          cfg->prach_config.prach_sequence_length.value,
++          rach_ConfigCommon->rach_ConfigGeneric.prach_ConfigurationIndex);
++  fflush(stderr);
+   cfg->num_tlv++;
+ 
+   cfg->prach_config.prach_ConfigurationIndex.value = rach_ConfigCommon->rach_ConfigGeneric.prach_ConfigurationIndex;
+@@ -737,9 +743,9 @@ static void config_common(gNB_MAC_INST *nrmac, const nr_mac_config_t *config, NR
                      cfg->ssb_table.ssb_subcarrier_offset.value;
      if (cfg->carrier_config.dl_frequency.value != cfg->carrier_config.uplink_frequency.value) {
        LOG_I(NR_MAC,
@@ -874,7 +906,7 @@ index 005ad05720..863e394c9a 100644
              bw,
              mu,
              band,
-@@ -747,7 +748,7 @@ static void config_common(gNB_MAC_INST *nrmac, const nr_mac_config_t *config, NR
+@@ -747,7 +753,7 @@ static void config_common(gNB_MAC_INST *nrmac, const nr_mac_config_t *config, NR
              get_softmodem_params()->threequarter_fs ? "-E" : "");
      } else {
        LOG_I(NR_MAC,
@@ -905,10 +937,25 @@ index 623e8514c0..91f162ded6 100644
      const NR_SCS_SpecificCarrier_t *orig = frequencyInfoDL->scs_SpecificCarrierList.list.array[i];
      NR_SCS_SpecificCarrier_t *new = NULL;
 diff --git a/openair2/LAYER2/nr_pdcp/cucp_cuup_handler.c b/openair2/LAYER2/nr_pdcp/cucp_cuup_handler.c
-index 2789390488..74cb640d9e 100644
+index 2789390488..56548a90cc 100644
 --- a/openair2/LAYER2/nr_pdcp/cucp_cuup_handler.c
 +++ b/openair2/LAYER2/nr_pdcp/cucp_cuup_handler.c
-@@ -205,6 +205,10 @@ void e1_bearer_context_setup(const e1ap_bearer_setup_req_t *req)
+@@ -122,10 +122,13 @@ static int drb_gtpu_create(instance_t instance,
+   create_tunnel_req.num_tunnels = 1;
+   create_tunnel_req.ue_id = ue_id;
+ 
++  fprintf(stderr, "[CUUP-DBG] before gtpv1u_create_ngu_tunnel\n"); fflush(stderr);
+   // we use gtpv1u_create_ngu_tunnel because it returns the interface
+   // address and port of the interface; apart from that, we also might call
+   // newGtpuCreateTunnel() directly
+-  return gtpv1u_create_ngu_tunnel(instance, &create_tunnel_req, create_tunnel_resp, callBack, callBackSDAP);
++  int ret = gtpv1u_create_ngu_tunnel(instance, &create_tunnel_req, create_tunnel_resp, callBack, callBackSDAP);
++  fprintf(stderr, "[CUUP-DBG] after gtpv1u_create_ngu_tunnel ret=%d\n", ret); fflush(stderr);
++  return ret;
+ }
+ 
+ static instance_t get_n3_gtp_instance(void)
+@@ -205,6 +208,10 @@ void e1_bearer_context_setup(const e1ap_bearer_setup_req_t *req)
      // GTP tunnel for N3/to core
      gtpv1u_gnb_create_tunnel_resp_t resp_n3 = {0};
      int qfi = req_drb->qosFlows[0].qfi;
@@ -919,7 +966,7 @@ index 2789390488..74cb640d9e 100644
      int ret = drb_gtpu_create(n3inst,
                                cu_up_ue_id,
                                req_drb->id,
-@@ -215,6 +219,8 @@ void e1_bearer_context_setup(const e1ap_bearer_setup_req_t *req)
+@@ -215,6 +222,8 @@ void e1_bearer_context_setup(const e1ap_bearer_setup_req_t *req)
                                nr_pdcp_data_req_drb,
                                sdap_data_req,
                                &resp_n3);
@@ -1311,3 +1358,59 @@ index 8a2cfeead5..c0c5b0be45 100644
    }
    /* optional */
    //NGAP_UERadioCapabilityForPaging TBD
+diff --git a/openair3/ocp-gtpu/gtp_itf.cpp b/openair3/ocp-gtpu/gtp_itf.cpp
+index 6650439e81..5c8858993d 100644
+--- a/openair3/ocp-gtpu/gtp_itf.cpp
++++ b/openair3/ocp-gtpu/gtp_itf.cpp
+@@ -664,9 +664,14 @@ teid_t newGtpuCreateTunnel(instance_t instance,
+                            gtpCallback callBack,
+                            gtpCallbackSDAP callBackSDAP)
+ {
++  fprintf(stderr, "[NCT-DBG] enter inst=%ld ue=%lu bearer=%d outgoing=%d\n",
++          (long)instance, (unsigned long)ue_id, incoming_bearer_id, outgoing_bearer_id); fflush(stderr);
+   pthread_mutex_lock(&globGtp.gtp_lock);
++  fprintf(stderr, "[NCT-DBG] got lock\n"); fflush(stderr);
+   getInstRetInt(compatInst(instance));
++  fprintf(stderr, "[NCT-DBG] inst found, finding ue\n"); fflush(stderr);
+   auto it = inst->ue2te_mapping.find(ue_id);
++  fprintf(stderr, "[NCT-DBG] find done, exists=%d\n", (it != inst->ue2te_mapping.end())); fflush(stderr);
+ 
+   if (it != inst->ue2te_mapping.end() && it->second.bearers.find(outgoing_bearer_id) != it->second.bearers.end()) {
+     LOG_W(GTPU, "[%ld] Create a config for a already existing GTP tunnel (ue id %lu)\n", instance, ue_id);
+@@ -824,18 +829,25 @@ int gtpv1u_create_ngu_tunnel(const instance_t instance,
+                              gtpCallback callBack,
+                              gtpCallbackSDAP callBackSDAP)
+ {
++  fprintf(stderr, "[GTPU-DBG] gtpv1u_create_ngu_tunnel inst=%ld ue=%lu nt=%d teid=0x%x\n",
++          (long)instance, (unsigned long)create_tunnel_req->ue_id,
++          create_tunnel_req->num_tunnels, create_tunnel_req->outgoing_teid[0]); fflush(stderr);
+   LOG_D(GTPU,
+         "[%ld] Start create tunnels for ue id %lu, num_tunnels %d, TEID 0x%x\n",
+         instance,
+         create_tunnel_req->ue_id,
+         create_tunnel_req->num_tunnels,
+         create_tunnel_req->outgoing_teid[0]);
++  fprintf(stderr, "[GTPU-DBG] about to lock globGtp.gtp_lock\n"); fflush(stderr);
+   pthread_mutex_lock(&globGtp.gtp_lock);
++  fprintf(stderr, "[GTPU-DBG] got lock, calling getInstRetInt\n"); fflush(stderr);
+   getInstRetInt(compatInst(instance));
++  fprintf(stderr, "[GTPU-DBG] inst->foundAddrLen=%d\n", inst->foundAddrLen); fflush(stderr);
+ 
+   uint8_t addr[inst->foundAddrLen];
+   memcpy(addr, inst->foundAddr, inst->foundAddrLen);
+   pthread_mutex_unlock(&globGtp.gtp_lock);
++  fprintf(stderr, "[GTPU-DBG] unlock, about to newGtpuCreateTunnel\n"); fflush(stderr);
+   for (int i = 0; i < create_tunnel_req->num_tunnels; i++) {
+     teid_t teid = newGtpuCreateTunnel(instance,
+                                       create_tunnel_req->ue_id,
+@@ -853,8 +865,10 @@ int gtpv1u_create_ngu_tunnel(const instance_t instance,
+     memcpy(create_tunnel_resp->gnb_addr.buffer, addr, sizeof(addr));
+     create_tunnel_resp->gnb_addr.length = sizeof(addr);
+     create_tunnel_resp->pdusession_id[i] = create_tunnel_req->pdusession_id[i];
++    fprintf(stderr, "[GTPU-DBG] newGtpuCreateTunnel returned teid=0x%x\n", teid); fflush(stderr);
+   }
+ 
++  fprintf(stderr, "[GTPU-DBG] gtpv1u_create_ngu_tunnel returning OK\n"); fflush(stderr);
+   return !GTPNOK;
+ }
+ 

@@ -596,6 +596,73 @@ the split — but the assert that was killing the PNF is now defanged.
 
 ---
 
+## 2026-05-26 update — disciplined retest, found 2 more bugs along the way
+
+Ran a careful clean cycle (kill everything; wait; verify; start VNF;
+wait; start PNF; wait; start UE). Instrumented `drb_gtpu_create` →
+`gtpv1u_create_ngu_tunnel` → `newGtpuCreateTunnel` with `[CUUP-DBG]`,
+`[GTPU-DBG]`, `[NCT-DBG]` printfs to localise the integrated CU-UP hang.
+
+The PNF crash that was killing the chain was actually because the gNB
+config had `prach_ConfigurationIndex=98` (a *short* PRACH config, A2),
+which the VNF correctly forwards to the PNF — confirmed via
+`[PRACH-VNF-DBG] present=2 value=1` (l139 → short PRACH) and matched
+on the receive side by `[PRACH-CFG-DBG] prach_sequence_length value=1`.
+So the PRACH config is good across the wire.
+
+The actual nFAPI-split PNF assertion that killed the data plane was
+**`fill_ul_rb_mask`: `harq_pid 2449 is not allocated`** — that was the
+PNF L1 RX thread firing before `init_nr_transport()` finished populating
+`gNB->ulsch[]`. Fix landed (skip NULL entries instead of asserting).
+
+Additional bugs surfaced:
+
+- **stdio buffering**: PNF's `printf()` output got buffered when run as
+  `nohup setsid` without a terminal, hiding the actual progress. Fixed
+  by wrapping with `stdbuf -oL -eL`.
+- **VNF startup race**: After kill/restart, the VNF can stall at
+  `time manager configuration` if a stale PNF connection from a prior
+  run is still in `ESTAB` on the SCTP listener. The new VNF inherits
+  these and gets confused. Workaround: `kill -9` the old VNF *directly
+  by PID* (not via `pkill` over SSH which can flake), wait for SCTP
+  state to clear, then start.
+
+### End-to-end status
+
+- **Signaling plane on the split works**: PRACH → RAR → RRC Setup →
+  NAS Auth → Registration Accept → NGAP PDU Session Resource Setup
+  Request → Initial Context Setup. Verified live via `/tmp/vnf.log`
+  and `/tmp/ue.log`.
+- **`drb_gtpu_create()` reached on the VNF**: `[CUUP-DBG] enter
+  drb_gtpu_create n3inst=92 sessionId=10 qfi=1 teId=0x7 tlAddress=2aedfea9`
+  (`2aedfea9` byte-swapped = `0xa9fe ed2a` = 169.254.237.42, Ella's UPF).
+- **`gtpv1u_create_ngu_tunnel()` reached**: `[GTPU-DBG] inst=92 ue=2 nt=1`,
+  lock acquired, `inst->foundAddrLen=4` (IPv4), mutex released.
+- **Death point**: `newGtpuCreateTunnel()` SIGSEGV right after
+  `[GTPU-DBG] unlock, about to newGtpuCreateTunnel`. The crash is
+  inside the C++ std::map `ue2te_mapping.find()` call — likely a
+  cross-mutex re-entrancy or an uninitialised gtpEndPoint on armhf.
+
+### What the eleven-fix port can actually do today
+
+Confirmed working:
+- ✅ Armhf cross-compile of full L2+L3 + NGAP + GTP-U
+- ✅ Patched Ella Core 5GC on the same armhf board
+- ✅ nFAPI P5 + P7 handshake (PNF Jetson ↔ VNF board)
+- ✅ Full air interface up to RRC_CONNECTED on the split
+- ✅ Full NAS Registration Accept via the split
+- ✅ Full data plane in monolithic mode (Jetson gNB → ADRV Ella UPF,
+  ping `10.45.0.254` 28-33 ms RTT, 0% loss)
+
+Not yet working over the *split*:
+- ❌ Last 100 m: `newGtpuCreateTunnel` SIGSEGV on armhf. This is the
+  next concrete bug to isolate.
+
+Updated `patches/oai-armhf.patch` (1416 lines, 30 files) to include
+the latest diagnostic prints + the ULSCH NULL-skip fix.
+
+---
+
 ## 2026-05-26 update — Data plane VERIFIED in monolithic mode
 
 Bypassed the nFAPI split by running OAI monolithic on the Jetson (L1+L2+L3

@@ -12,6 +12,7 @@ nfapi/oai_integration/nfapi_vnf.c
 openair1/PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment/nrLDPC_coding_segment_encoder.c
 openair1/PHY/CODING/nrPolar_tools/nr_polar_defs.h
 openair1/PHY/CODING/nrPolar_tools/nr_polar_encoder.c
+openair1/PHY/INIT/nr_init.c
 openair1/PHY/MODULATION/nr_modulation.c
 openair1/PHY/NR_TRANSPORT/nr_ulsch_demodulation.c
 openair1/SCHED_NR/phy_procedures_nr_gNB.c
@@ -26,3 +27,4 @@ openair3/NGAP/ngap_gNB_encoder.c
 openair3/NGAP/ngap_gNB_handlers.c
 openair3/NGAP/ngap_gNB_mobility_management.c
 openair3/NGAP/ngap_gNB_nas_procedures.c
+openair3/ocp-gtpu/gtp_itf.cpp
