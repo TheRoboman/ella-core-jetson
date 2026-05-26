@@ -711,15 +711,3 @@ index 6ac8443581..d6ba1e8b1c 100644
 +{GNB_CONFIG_STRING_MSGATRANSFORMPRECODER_R16,NULL,0,.lptr=(long*)scc->uplinkConfigCommon->initialUplinkBWP->ext1->msgA_ConfigCommon_r16->choice.setup->msgA_PUSCH_Config_r16->msgA_TransformPrecoder_r16,.deflongval=NR_MsgA_PUSCH_Config_r16__msgA_TransformPrecoder_r16_disabled,TYPE_LONG,0},\
 +{GNB_CONFIG_STRING_MSGACBPREAMBLESPERSHAREDRO_R16,NULL,0,.lptr=(long*)scc->uplinkConfigCommon->initialUplinkBWP->ext1->msgA_ConfigCommon_r16->choice.setup->rach_ConfigCommonTwoStepRA_r16.msgA_CB_PreamblesPerSSB_PerSharedRO_r16,.deflongval=1,TYPE_LONG,0}}
  #endif
-diff --git a/openair2/GNB_APP/gnb_config.c b/openair2/GNB_APP/gnb_config.c
-index f9e8261c0f..ab12ca087f 100644
---- a/openair2/GNB_APP/gnb_config.c
-+++ b/openair2/GNB_APP/gnb_config.c
-@@ -160,7 +160,6 @@ void prepare_scc(NR_ServingCellConfigCommon_t *scc)
-   NR_FreqBandIndicatorNR_t *dl_frequencyBandList = calloc_or_fail(1, sizeof(*dl_frequencyBandList));
-   asn1cSeqAdd(&frequencyInfoDL->frequencyBandList.list, dl_frequencyBandList);
-   struct NR_SCS_SpecificCarrier *dl_scs_SpecificCarrierList = calloc_or_fail(1, sizeof(*dl_scs_SpecificCarrierList));
--  asn1cSeqAdd(&frequencyInfoDL->scs_SpecificCarrierList.list, dl_scs_SpecificCarrierList);
- 
-   INIT_SETUP_RELEASE(PDCCH_ConfigCommon, scc->downlinkConfigCommon->initialDownlinkBWP->pdcch_ConfigCommon);
-   NR_SetupRelease_PDCCH_ConfigCommon_t *pdcch_ConfigCommon = scc->downlinkConfigCommon->initialDownlinkBWP->pdcch_ConfigCommon;

@@ -206,24 +206,57 @@ That means there are MORE descriptors elsewhere with the same
 `GNB_TIMERS_PARAMS_DESC`, plus any further-nested descriptors
 RCconfig_nr_macrlc uses.
 
+### Result of the TYPE_LONG conversion
+
+After patching all four libconfig/cmdline/yaml/load_configmodule paths
+plus the SCC family of macros, the VNF binary now:
+
+1. ✅ Passes prepare_scc/prepare_msgA_scc
+2. ✅ Passes both GET_PARAMS_LIST(SCC, MsgA) calls (no corruption)
+3. ✅ Successfully reads ServingCellConfigCommon and logs:
+   `[RRC] Read in ServingCellConfigCommon (PhysCellId 1, ABSFREQSSB 641280, DLBand 78, ABSFREQPOINTA 640008, DLBW 106, RACH_TargetReceivedPower -96)`
+4. ✅ Configures TDD pattern (5 ms total, 8 DL slots, 3 UL slots)
+5. ✅ Sets MIB encoding, PUSCH/PUCCH targets, antenna config
+6. ✅ Logs all 10 TDD slot configurations (slots 0-9 DOWNLINK/UPLINK/FLEXIBLE)
+7. ❌ SIGSEGVs immediately after — inside libc (PC 0xb69dac6e in
+   `/usr/lib/arm-linux-gnueabihf/libc.so.6`), unwind shows corrupt stack.
+
+The crash is no longer in our descriptor code at all. It's now in libc
+called from somewhere in the MAC/PHY init that runs after
+`set_tdd_config_nr()`. Likely candidates:
+- `init_DL_MIMO_codebook()` (line 709 in `openair2/LAYER2/NR_MAC_gNB/config.c`)
+- The `if (IS_SA_MODE(get_softmodem_params()))` block that reads
+  `frequencyInfoDL->scs_SpecificCarrierList.list.array[0]->carrierBandwidth`
+  (line 728)
+- A printf/snprintf with a bad format that the corrupted stack
+  doesn't even survive
+
+The corrupt-stack signature suggests a buffer-overflow that overwrote
+the return address before libc's frame, OR a printf format mismatch
+(e.g. `%lld` against `long` on armhf prints garbage AND consumes
+8 bytes from varargs which slides everything below).
+
+### Other ABI hazards found (none currently blocking)
+
+While scanning the codebase:
+- `time_meas.h` armhf `rdtsc_oai` used privileged CP15 instruction
+  → fixed by switching to `clock_gettime(CLOCK_MONOTONIC)`
+- `nr_modulation.c:281` uses `vqtbl1q_u8` (aarch64-only) but is
+  properly gated by `#if defined(__aarch64__) && defined(USE_NEON)`
+  → no fix needed
+- 22 `.i64ptr=` entries in `sl_preconfig_paramvalues.h` (UE-side
+  sidelink) target ASN.1 `long *` but are not in the VNF path
+- 11 TYPE_INT64 entries in `gnb_paramdef.h` use `.i64ptr=NULL` (set
+  at runtime). Inspection shows they store native int64 values
+  parsed from config (no ASN.1 target), so they're correct as-is.
+
 ### Conclusion
 
-The 32-bit ABI fix is real (TYPE_LONG works), but **every descriptor
-in OAI that targets ASN.1 `long *` with `TYPE_INT64` needs the same
-treatment**. We've fixed the three SCC ones; the OAI tree has many
-more (a rough grep for `.i64ptr=` across `*PARAMS_DESC` macros gives
-~100+ entries). Each unfixed one is a latent corruption source on
-32-bit ARM.
-
-This is a real upstream issue. For a complete armhf port of OAI we'd
-need to:
-1. Audit every `*PARAMS_DESC` macro and identify which targets are
-   ASN.1 `long *` (vs genuine `int64_t *`).
-2. Convert each to TYPE_LONG.
-3. Ideally upstream the change to OAI mainline.
-
-That's a meaningful undertaking. Current status: framework in place,
-3 macros done, ~unknown more to find.
+The TYPE_LONG fix and SCCPARAMS_DESC conversion brought us from
+"crash at config parse" all the way through to "crash in libc during
+PHY init" — meaningful progress. The remaining crash is not in our
+descriptor system and needs separate investigation (likely a printf
+format mismatch or another L1-side intrinsic issue we haven't found).
 
 ## What's Next
 
