@@ -173,39 +173,57 @@ Root-caused by bisecting with `fprintf` debug:
    because GET_PARAMS performs many such 4-byte overflows; corruption
    spreads to other adjacent fields that we did not snapshot.
 
-### Why the fix is non-trivial
+### Fix: introduce TYPE_LONG in OAI's config system
 
-Three potential fixes, in order of how invasive they are:
+Implemented across the config layer:
 
-A. **Patch the libconfig handler to do a 4-byte write conditionally.**
-   The handler only sees `.u64ptr` (`int64_t *`), with no information
-   about target size. We'd have to add a new TYPE marker (TYPE_LONG)
-   that means "write `sizeof(long)` bytes" and convert all the affected
-   descriptor entries. Cleanest, but many descriptor entries to convert.
+- `common/config/config_paramdesc.h`: added `.lptr` / `.ulptr` to the
+  value-pointer union (`long *`), `.deflongval` to the default union,
+  and `TYPE_LONG = 11` / `TYPE_ULONG = 12` enum values.
+- `common/config/libconfig/config_libconfig.c`: added read+write cases
+  for TYPE_LONG that use `sizeof(long)` byte writes through `.lptr`.
+- `common/config/config_cmdline.c`: TYPE_LONG cmdline parser.
+- `common/config/config_common.c/.h`: `config_setdefault_long()` for
+  default values.
+- `common/config/config_load_configmodule.c`: dispatch case.
+- `common/config/yaml/config_yaml.cpp`: yaml read case.
 
-B. **Hack SCCPARAMS_DESC on armhf to use TYPE_INT (4-byte write).**
-   On 32-bit, `int` and `long` are both 4 bytes, so `iptr` writes to
-   `long *` are correct. On 64-bit this would NOT be correct (upper
-   4 bytes left as calloc-zero), but the macro is only used on the
-   target build. Could be wrapped in `#if __SIZEOF_LONG__ == 4`.
+Then converted `SCCPARAMS_DESC`, `SCC_PATTERN2_PARAMS_DESC`, and
+`MSGASCCPARAMS_DESC` (in `RRC_nr_paramsvalues.h`) from `TYPE_INT64` /
+`.i64ptr` / `.defint64val` to `TYPE_LONG` / `.lptr=(long*)…` /
+`.deflongval`. Mechanical sed-like change preserving target pointers.
 
-C. **Rebuild the kernel/Linux for 64-bit (aarch64).** The Zynq-7035
-   does not support aarch64 — Cortex-A9 is armv7 only. Not an option.
+### Result so far
 
-Option A is the right long-term fix; option B is the pragmatic
-short-term fix and is what we'll attempt next.
+The SCC crash at line ~1023 (`array[0]->carrierBandwidth` deref) is
+gone — VNF startup progresses past `get_scc_config()`.
 
-### Other observations
+But: `RCconfig_nr_macrlc` SIGSEGVs **later** in its execution at a
+different offset, with the same NULL-deref-via-offset-40 pattern.
+That means there are MORE descriptors elsewhere with the same
+`TYPE_INT64` → `long *` bug. Candidates from the call site list:
+`GNBPARAMS_DESC`, `MACRLCPARAMS_DESC`, `RUPARAMS_DESC`,
+`GNB_TIMERS_PARAMS_DESC`, plus any further-nested descriptors
+RCconfig_nr_macrlc uses.
 
-- The same problem will affect *every* TYPE_INT64 descriptor that
-  targets ASN.1 `long *`. There are dozens of these across OAI's
-  config descriptors (not just SCC). Each one is a potential corruption
-  source on armhf. The crash we hit is just the first to trigger.
-- This bug is dormant on x86_64/aarch64 (the only OAI-supported
-  platforms in practice) because `long == int64_t` there.
-- For a serious armhf port, the long-term fix in OAI's config system
-  is essential. For our prototype, we can patch only the SCC and PNF
-  paths needed for nFAPI.
+### Conclusion
+
+The 32-bit ABI fix is real (TYPE_LONG works), but **every descriptor
+in OAI that targets ASN.1 `long *` with `TYPE_INT64` needs the same
+treatment**. We've fixed the three SCC ones; the OAI tree has many
+more (a rough grep for `.i64ptr=` across `*PARAMS_DESC` macros gives
+~100+ entries). Each unfixed one is a latent corruption source on
+32-bit ARM.
+
+This is a real upstream issue. For a complete armhf port of OAI we'd
+need to:
+1. Audit every `*PARAMS_DESC` macro and identify which targets are
+   ASN.1 `long *` (vs genuine `int64_t *`).
+2. Convert each to TYPE_LONG.
+3. Ideally upstream the change to OAI mainline.
+
+That's a meaningful undertaking. Current status: framework in place,
+3 macros done, ~unknown more to find.
 
 ## What's Next
 
