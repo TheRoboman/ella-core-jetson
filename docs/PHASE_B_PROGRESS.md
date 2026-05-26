@@ -258,9 +258,63 @@ PHY init" — meaningful progress. The remaining crash is not in our
 descriptor system and needs separate investigation (likely a printf
 format mismatch or another L1-side intrinsic issue we haven't found).
 
+---
+
+## 2026-05-26 update — VNF boots end-to-end + NGAP to Ella Core
+
+The "crash in libc" was indeed printf format-string ABI mismatches.
+On armhf `long` is 4 bytes but `uint64_t` is 8. Several `LOG_I` calls
+in OAI's hot path used `%lu`/`%ld` to print `uint64_t` values, which
+on x86_64/aarch64 happen to coincide (long==int64) but on armhf
+misalign the varargs cursor — printf then reads a garbage pointer
+for the trailing `%s` and SIGSEGVs inside libc.
+
+### Three format-string fixes
+
+| File | Symptom | Fix |
+|------|---------|-----|
+| `openair2/LAYER2/NR_MAC_gNB/config.c:747` | Crash printing "Command line parameters for OAI UE: -C %lu --CO %ld …" with `carr_dl`/`carr_ul` (uint64_t) | switch to `%" PRIu64 "` / `%" PRId64 "` |
+| `openair2/GNB_APP/gnb_config.c:1167` | Hang printing "F1AP: gNB_DU_id %ld … cellID %ld" with both fields uint64_t | `%" PRIu64 "` for both |
+| `openair2/GNB_APP/gnb_config.c:1682` | "Configured DU: cell ID %lu" with uint64_t | `%" PRIu64 "` |
+
+Bonus: `openair2/LAYER2/NR_MAC_gNB/nr_radio_config.c:2741` had
+`cellID < (1l << 36)` — shifting a 32-bit `long` left by 36 is
+undefined and produces 0 on armhf, so the assertion always fires.
+Fixed to `(uint64_t)1 << 36`.
+
+### Boot now reaches NGAP + internal F1
+
+```
+[GNB_APP] F1AP: gNB idx 0 gNB_DU_id 3584, gNB_DU_name gNB-Eurecom-5GNRBox,
+         TAC 1 MCC/MNC/length 1/1/2 cellID 12345678
+[GNB_APP] Configured DU: cell ID 12345678, PCI 0
+[NGAP]   Send NGSetupRequest to AMF
+[NGAP]   Received NGSetupResponse from AMF
+[NR_RRC] Received F1 Setup Request from gNB_DU 3584 on assoc_id -1306516648
+[NR_RRC] DU 3584: sending F1 Setup Response
+[MAC]    received F1 Setup Response from CU
+[MAC]    CU uses RRC version 17.3.0
+```
+
+So: **Cortex-A9 board runs L2+L3 (OAI VNF) + 5GC (Ella Core),
+SCTP/NGAP handshake completes, internal F1 between CU and DU
+completes** — Phase B's "co-located on board" sanity check is done.
+
+### Remaining items before nFAPI handshake
+
+1. **GTP-U port conflict**: Ella's UPF and OAI gNB both bind UDP/2152
+   on the board's IP. Currently OAI just logs
+   `bind: Address already in use` and continues; we need to either
+   change one of them or run UPF on the TUN address only.
+2. **PNF on Jetson**: build/run the L1 half against `--nfapi PNF`
+   pointing at `169.254.237.42`.
+3. **First handshake**: confirm P5 (config) and P7 (slot) messages
+   exchange between PNF (Jetson) and VNF (board).
+
 ## What's Next
 
-1. ⏳ Resolve `get_scc_config` NULL-deref (only blocker left)
-2. Configure systemd unit on board for `nr-softmodem --nfapi VNF`
-3. Configure PNF on Jetson, point at board, attempt nFAPI handshake
+1. Resolve UPF/gNB GTP-U port conflict (rebind UPF or pick a new port)
+2. Build/configure OAI PNF on Jetson against the board's VNF
+3. Capture nFAPI handshake (P5/P7) + try first UE attach end-to-end
+4. Performance comparison vs Phase A (gNB on Jetson, 5GC on board)
 4. Full UE attach via the split, compare metrics vs Phase A
