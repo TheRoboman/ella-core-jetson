@@ -483,3 +483,66 @@ This is a CU-UP/GTP-U issue, not an armhf-specific encoder issue. Either:
    targets).
 3. Once GTP-U tunnel is up: `ip a show oaitun_ue1` should appear on the
    UE side and ping over 10.45.0.x should work.
+
+---
+
+## 2026-05-26 update — Root cause of the PDU-session stall: PNF UL-HARQ crash
+
+Adding `[CUUP-DBG]` prints around `drb_gtpu_create`/`e1_add_bearers` and
+re-running revealed that the VNF *isn't* stalling in the CU-UP. The PNF
+on the Jetson dies first:
+
+```
+Assertion (ulsch_harq != ((void *)0)) failed!
+In fill_ul_rb_mask() openair1/SCHED_NR/phy_procedures_nr_gNB.c:692
+harq_pid 2449 is not allocated
+```
+
+`harq_pid=2449` (0x991) is obviously garbage — valid PIDs are 0–15.
+Just before this, the VNF log shows
+`Unexpected ULSCH HARQ PID 15 (have 14) for RNTI 0x4130` — the MAC's
+HARQ bookkeeping is already out of sync. The PNF then dies, the P5
+SCTP socket goes down, the VNF stops emitting DL_TTI_REQs, the UE
+loses sync after T310, RRC_CONNECTION_FAILURE follows.
+
+So the chain that survives end-to-end is:
+1. nFAPI P5/P7 setup
+2. PRACH → RAR → Msg3 → Msg4 → RRC_CONNECTED
+3. NAS Authentication / Security Mode / Registration Accept
+4. NGAP InitialContextSetup → PDU Session Resource Setup Request from AMF
+5. VNF starts integrated CU-UP path
+6. **Sometime here, an UL_TTI_REQ from VNF references a HARQ PID that
+   the PNF never allocated → PNF aborts → whole split collapses.**
+
+The bug isn't in the air-interface, RRC, NAS, or NGAP — those all work.
+It's in OAI's `ulsch->harq_process` lifecycle across the VNF/PNF split:
+either an off-by-one between MAC scheduling on the VNF and HARQ
+allocation on the PNF, a stale UL_TTI_REQ targeting a freed HARQ, or a
+field corruption in the nFAPI wire format when interleaved with high-rate
+DL_TTI/TX_DATA traffic.
+
+This is an OAI nFAPI design issue, not an armhf-port issue. To bring up
+a working data plane on this split, the next step is to either:
+
+- run with NFAPI in MONOLITHIC mode on the VNF (no real PNF) just to
+  prove end-to-end NAS + GTP-U works, then re-introduce the split;
+- or run CU-UP as a separate process so the VNF stops carrying both
+  RRC and CU-UP state in one thread;
+- or patch fill_ul_rb_mask to skip stale ulsch entries instead of
+  AssertFatal.
+
+### Net result of this session
+
+- **OAI L2+L3 (VNF) runs on armv7 Cortex-A9** alongside the patched
+  Ella Core 5GC, with custom RT-ish kernel.
+- **nFAPI split (PNF on Jetson L1 ↔ VNF on ADRV L2+L3) works** for P5
+  config, P7 slot, full air-interface, and the entire signaling plane
+  through NAS Registration Accept + NGAP PDUSessionResourceSetupRequest.
+- **Eleven separate armhf-specific bugs were fixed** to get this far,
+  spanning the SCC config descriptor (TYPE_LONG), printf format specifiers
+  for uint64_t cellID/AMBR/AMF_UE_NGAP_ID, ASN.1 decoder width
+  (asn_INTEGER2ulong → asn_INTEGER2uint64), an undefined `(1l << 36)`
+  shift, the nFAPI phy_id allocation, and a non-fatal pthread_setname_np.
+- **The remaining UL HARQ crash on the PNF is OAI-side, not armhf-side**,
+  and needs separate investigation focused on `ulsch->harq_process`
+  ownership across the nFAPI boundary.
