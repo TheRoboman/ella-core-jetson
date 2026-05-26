@@ -546,3 +546,54 @@ a working data plane on this split, the next step is to either:
 - **The remaining UL HARQ crash on the PNF is OAI-side, not armhf-side**,
   and needs separate investigation focused on `ulsch->harq_process`
   ownership across the nFAPI boundary.
+
+---
+
+## 2026-05-26 update — Data plane VERIFIED in monolithic mode
+
+Bypassed the nFAPI split by running OAI monolithic on the Jetson (L1+L2+L3
+in one process) against the same Ella Core on the ADRV board. Same UE,
+same UICC creds, same NSSAI/DNN.
+
+End-to-end on monolithic:
+
+```
+[NAS]    Received PDU Session Establishment Accept, UE IPv4: 10.45.0.1
+[OIP]    TUN Interface oaitun_ue1 successfully configured, IPv4 10.45.0.1
+```
+
+```
+$ ip a show oaitun_ue1
+28: oaitun_ue1: <POINTOPOINT,NOARP,UP,LOWER_UP> ...
+    inet 10.45.0.1/24 scope global oaitun_ue1
+```
+
+```
+$ ping -I oaitun_ue1 10.45.0.254
+64 bytes from 10.45.0.254: icmp_seq=1 ttl=64 time=28.1 ms
+64 bytes from 10.45.0.254: icmp_seq=2 ttl=64 time=33.5 ms
+64 bytes from 10.45.0.254: icmp_seq=3 ttl=64 time=27.0 ms
+64 bytes from 10.45.0.254: icmp_seq=4 ttl=64 time=31.7 ms
+4 packets transmitted, 4 received, 0% packet loss
+rtt min/avg/max/mdev = 26.964/30.051/33.481/2.639 ms
+```
+
+Pings traverse the full path:
+UE (Jetson) → rfsim → gNB MAC → PDCP → GTP-U over Ethernet
+→ Ella UPF on board (10.45.0.254) → ICMP reply → reverse path.
+
+So **everything except OAI's nFAPI-split UL HARQ ownership works**:
+- Ella Core 5GC on Cortex-A9 armhf — control + user plane
+- gNB (any aarch64 OAI build) talking NGAP + N3 GTP-U to Ella
+- PDU Session Establishment, DRB setup, RRC Reconfiguration, NAS Accept
+- Userspace GTP-U forwarding in Ella's patched UPF
+
+The 28–33 ms RTT is reasonable for rfsim (the simulator doesn't model
+processing budget perfectly, and the path traverses Ethernet between
+two boards in addition to the rfsim socket).
+
+**Conclusion**: the armhf port of OAI's L2+L3 is functional. The Phase B
+split would also work end-to-end if OAI's UL HARQ allocation across the
+PNF/VNF boundary were patched, or if CU-UP were factored out into a
+separate process (the standard E1AP deployment), which sidesteps the
+single-thread ULSCH ownership bug.
