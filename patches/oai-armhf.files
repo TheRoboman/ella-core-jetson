@@ -19,6 +19,7 @@ openair2/GNB_APP/RRC_nr_paramsvalues.h
 openair2/GNB_APP/gnb_config.c
 openair2/LAYER2/NR_MAC_gNB/config.c
 openair2/LAYER2/NR_MAC_gNB/nr_radio_config.c
+openair2/LAYER2/nr_pdcp/cucp_cuup_handler.c
 openair2/RRC/NR/rrc_gNB_du.c
 openair3/NGAP/ngap_common.c
 openair3/NGAP/ngap_gNB_encoder.c

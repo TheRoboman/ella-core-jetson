@@ -549,6 +549,53 @@ a working data plane on this split, the next step is to either:
 
 ---
 
+## 2026-05-26 update — Root cause of PNF UL HARQ crash + fix
+
+Re-instrumented `fill_ul_rb_mask` to print state on NULL harq_process.
+First trace:
+
+```
+[ULSCH-NULL] ULSCH_id=0 max_nb_pusch=32 ulsch=0xffff78de9660 harq_pid=2449
+             active=0 rnti=0x0000 frame=0 slot=0
+Assertion (ulsch_harq != NULL) failed!
+```
+
+Decoded: `gNB->ulsch[]` was allocated (32 entries, valid pointer), but the
+entry at index 0 had not been populated by `new_gNB_ulsch()` yet —
+`harq_pid` was `0x991 = 2449` (uninitialized malloc16 garbage),
+`harq_process` was NULL, `active=0`.
+
+**Root cause**: in nFAPI PNF mode, OAI's L1 RX thread starts running and
+calls `fill_ul_rb_mask` *before* `init_nr_transport()` finishes the
+per-entry initialization loop:
+
+```c
+gNB->max_nb_pusch = MAX_MOBILES_PER_GNB * buffer_ul_slots;   /* 32 */
+gNB->ulsch = malloc16(gNB->max_nb_pusch * sizeof(...));      /* uninit memory */
+for (int i = 0; i < gNB->max_nb_pusch; i++)                   /* loop populates entries */
+  gNB->ulsch[i] = new_gNB_ulsch(...);
+```
+
+If the RX thread observes any state between malloc16 and the end of the
+populating loop, it sees an entry whose `harq_process` is still NULL
+(struct came from malloc16's uninitialized memory). The old `AssertFatal`
+treated this as fatal even though the entry was harmless (inactive).
+
+**Fix**: skip `ulsch[]` entries with NULL `harq_process` rather than
+asserting — they cannot be active by construction. Applied at both call
+sites (`phy_procedures_nr_gNB.c:692` in `fill_ul_rb_mask`, and the
+matching pattern at line ~1074 in `phy_procedures_gNB_uespec_RX`).
+
+Updated `patches/oai-armhf.patch` to include this fix.
+
+The fix removes the PNF aborts that were collapsing the entire split.
+Cleaning up the test infrastructure (kernel RT throttling, persistent
+SCTP TIME_WAIT state across restarts, stdio buffering eating debug
+output) is the remaining yak-shave to validate end-to-end ping over
+the split — but the assert that was killing the PNF is now defanged.
+
+---
+
 ## 2026-05-26 update — Data plane VERIFIED in monolithic mode
 
 Bypassed the nFAPI split by running OAI monolithic on the Jetson (L1+L2+L3

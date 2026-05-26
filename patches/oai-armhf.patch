@@ -599,39 +599,39 @@ index ba4d192629..5617ce48ad 100644
  
  static void inner_rx(PHY_VARS_gNB *gNB,
 diff --git a/openair1/SCHED_NR/phy_procedures_nr_gNB.c b/openair1/SCHED_NR/phy_procedures_nr_gNB.c
-index ead0b624f7..cf84f9213b 100644
+index ead0b624f7..7fdaa640cf 100644
 --- a/openair1/SCHED_NR/phy_procedures_nr_gNB.c
 +++ b/openair1/SCHED_NR/phy_procedures_nr_gNB.c
-@@ -689,6 +689,14 @@ static void fill_ul_rb_mask(PHY_VARS_gNB *gNB,
+@@ -689,7 +689,13 @@ static void fill_ul_rb_mask(PHY_VARS_gNB *gNB,
    for (int ULSCH_id = 0; ULSCH_id < gNB->max_nb_pusch; ULSCH_id++) {
      NR_gNB_ULSCH_t *ulsch = &gNB->ulsch[ULSCH_id];
      NR_UL_gNB_HARQ_t *ulsch_harq = ulsch->harq_process;
-+    if (ulsch_harq == NULL) {
-+      fprintf(stderr,
-+              "[ULSCH-NULL] ULSCH_id=%d max_nb_pusch=%d ulsch=%p harq_pid=%d active=%d "
-+              "rnti=0x%04x frame=%d slot=%d\n",
-+              ULSCH_id, gNB->max_nb_pusch, (void *)ulsch, ulsch->harq_pid,
-+              (int)ulsch->active, ulsch->rnti, ulsch->frame, ulsch->slot);
-+      fflush(stderr);
-+    }
-     AssertFatal(ulsch_harq != NULL, "harq_pid %d is not allocated\n", ulsch->harq_pid);
+-    AssertFatal(ulsch_harq != NULL, "harq_pid %d is not allocated\n", ulsch->harq_pid);
++    /* In nFAPI PNF mode, the L1 RX thread can start running before
++     * init_nr_transport() has finished populating gNB->ulsch[]. Those
++     * entries contain uninitialized malloc16 memory (harq_process=NULL,
++     * harq_pid=garbage). Just skip them — by definition they cannot be
++     * active. The original AssertFatal here was overly strict. */
++    if (ulsch_harq == NULL)
++      continue;
      if (!(ulsch->active && ulsch->frame == frame_rx && ulsch->slot == slot_rx && !ulsch->handled))
        continue;
-@@ -1071,6 +1079,14 @@ int phy_procedures_gNB_uespec_RX(PHY_VARS_gNB *gNB, int frame_rx, int slot_rx, N
+     uint8_t symbol_start = ulsch_harq->ulsch_pdu.start_symbol_index;
+@@ -1071,7 +1077,13 @@ int phy_procedures_gNB_uespec_RX(PHY_VARS_gNB *gNB, int frame_rx, int slot_rx, N
    for (int ULSCH_id = 0; ULSCH_id < gNB->max_nb_pusch; ULSCH_id++) {
      NR_gNB_ULSCH_t *ulsch = &gNB->ulsch[ULSCH_id];
      NR_UL_gNB_HARQ_t *ulsch_harq = ulsch->harq_process;
-+    if (ulsch_harq == NULL) {
-+      fprintf(stderr,
-+              "[ULSCH-NULL] ULSCH_id=%d max_nb_pusch=%d ulsch=%p harq_pid=%d active=%d "
-+              "rnti=0x%04x frame=%d slot=%d\n",
-+              ULSCH_id, gNB->max_nb_pusch, (void *)ulsch, ulsch->harq_pid,
-+              (int)ulsch->active, ulsch->rnti, ulsch->frame, ulsch->slot);
-+      fflush(stderr);
-+    }
-     AssertFatal(ulsch_harq != NULL, "harq_pid %d is not allocated\n", ulsch->harq_pid);
+-    AssertFatal(ulsch_harq != NULL, "harq_pid %d is not allocated\n", ulsch->harq_pid);
++    /* In nFAPI PNF mode, the L1 RX thread can start running before
++     * init_nr_transport() has finished populating gNB->ulsch[]. Those
++     * entries contain uninitialized malloc16 memory (harq_process=NULL,
++     * harq_pid=garbage). Just skip them — by definition they cannot be
++     * active. The original AssertFatal here was overly strict. */
++    if (ulsch_harq == NULL)
++      continue;
      if (!(ulsch->active && ulsch->frame == frame_rx && ulsch->slot == slot_rx && !ulsch->handled))
        continue;
+     LOG_D(PHY, "PUSCH ID %d with RNTI %x detection started in frame %d slot %d\n", ULSCH_id, ulsch->rnti, frame_rx, slot_rx);
 diff --git a/openair2/GNB_APP/RRC_nr_paramsvalues.h b/openair2/GNB_APP/RRC_nr_paramsvalues.h
 index 6ac8443581..d6ba1e8b1c 100644
 --- a/openair2/GNB_APP/RRC_nr_paramsvalues.h
@@ -904,6 +904,30 @@ index 623e8514c0..91f162ded6 100644
    for (int i = 0; i < frequencyInfoDL->scs_SpecificCarrierList.list.count; i++) {
      const NR_SCS_SpecificCarrier_t *orig = frequencyInfoDL->scs_SpecificCarrierList.list.array[i];
      NR_SCS_SpecificCarrier_t *new = NULL;
+diff --git a/openair2/LAYER2/nr_pdcp/cucp_cuup_handler.c b/openair2/LAYER2/nr_pdcp/cucp_cuup_handler.c
+index 2789390488..74cb640d9e 100644
+--- a/openair2/LAYER2/nr_pdcp/cucp_cuup_handler.c
++++ b/openair2/LAYER2/nr_pdcp/cucp_cuup_handler.c
+@@ -205,6 +205,10 @@ void e1_bearer_context_setup(const e1ap_bearer_setup_req_t *req)
+     // GTP tunnel for N3/to core
+     gtpv1u_gnb_create_tunnel_resp_t resp_n3 = {0};
+     int qfi = req_drb->qosFlows[0].qfi;
++    fprintf(stderr, "[CUUP-DBG] enter drb_gtpu_create n3inst=%ld sessionId=%ld qfi=%d teId=0x%x tlAddress=%lx\n",
++            (long)n3inst, (long)req_pdu->sessionId, qfi,
++            req_pdu->UP_TL_information.teId,
++            (long)req_pdu->UP_TL_information.tlAddress); fflush(stderr);
+     int ret = drb_gtpu_create(n3inst,
+                               cu_up_ue_id,
+                               req_drb->id,
+@@ -215,6 +219,8 @@ void e1_bearer_context_setup(const e1ap_bearer_setup_req_t *req)
+                               nr_pdcp_data_req_drb,
+                               sdap_data_req,
+                               &resp_n3);
++    fprintf(stderr, "[CUUP-DBG] return drb_gtpu_create ret=%d tunnels=%d\n",
++            ret, resp_n3.num_tunnels); fflush(stderr);
+     AssertFatal(ret >= 0, "Unable to create GTP Tunnel for NG-U\n");
+     AssertFatal(resp_n3.num_tunnels == req_pdu->numDRB2Setup, "could not create all tunnels\n");
+     resp_pdu->tl_info.teId = resp_n3.gnb_NGu_teid[0];
 diff --git a/openair2/RRC/NR/rrc_gNB_du.c b/openair2/RRC/NR/rrc_gNB_du.c
 index 3381d60ce5..7a37258047 100644
 --- a/openair2/RRC/NR/rrc_gNB_du.c
