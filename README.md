@@ -35,12 +35,17 @@ ella-core-jetson/
 │   ├── cross-compile.sh               # Build Ella Core for armv7
 │   ├── build-sd-card.sh               # Build minimal Debian SD card
 │   ├── build-kernel.sh                # Build custom Zynq kernel
-│   │                                  #   (SCTP + netfilter + BTF enabled)
-│   └── deploy-kernel.sh               # Replace uImage/dtb on SD card
+│   │                                  #   (SCTP + netfilter + BTF + HZ_1000
+│   │                                  #    + NO_HZ_FULL + RCU_NOCB)
+│   ├── deploy-kernel.sh               # Replace uImage/dtb on SD card
+│   └── build-oai-armhf.sh             # Cross-compile OAI nr-softmodem for armv7
+│                                      #   (two-stage build, host generators + target)
 └── patches/
     ├── userspace-upf-and-armv7.patch  # Git patch against ellanetworks/core v1.10.2
     │                                  #   (userspace UPF + nil-map guards + armv7 32-bit fixes)
-    └── gtpu_forwarder.go              # New file: userspace GTP-U forwarder
+    ├── gtpu_forwarder.go              # New file: userspace GTP-U forwarder
+    └── oai-armhf.patch                # OAI patches for armv7 cross-compile
+                                       #   (NEON shims + 32-bit int polyfill + stubs)
 ```
 
 ## Deployment Targets
@@ -50,6 +55,7 @@ ella-core-jetson/
 | Jetson AGX Orin (aarch64, kernel 5.15) | ✅ Validated | This README |
 | ADRV9361-Z7035 (armv7, Cortex-A9) | ✅ Validated (full UE attach via custom kernel) | [ADRV9361_DEPLOYMENT.md](docs/ADRV9361_DEPLOYMENT.md), [results](docs/ADRV9361_RESULTS.md) |
 | Split: Jetson gNB → ADRV 5GC (Ethernet) | ✅ Validated with OAI rfsim + data plane | [SPLIT_PERFORMANCE.md](docs/SPLIT_PERFORMANCE.md) |
+| Phase B: Jetson L1 (PNF) → ADRV L2+L3+5GC (VNF) | 🚧 RT kernel + OAI armhf built; nFAPI config next | [PHASE_B_PROGRESS.md](docs/PHASE_B_PROGRESS.md) |
 
 ## Quick Start
 

@@ -1,0 +1,304 @@
+diff --git a/cmake_targets/armhf-toolchain.cmake b/cmake_targets/armhf-toolchain.cmake
+index 3a75fbf853..5526ae7afc 100644
+--- a/cmake_targets/armhf-toolchain.cmake
++++ b/cmake_targets/armhf-toolchain.cmake
+@@ -1,15 +1,35 @@
+ set(CMAKE_SYSTEM_NAME Linux)
+ set(CMAKE_SYSTEM_PROCESSOR armv7l)
+ 
+-set(CMAKE_C_COMPILER arm-linux-gnueabihf-gcc)
+-set(CMAKE_CXX_COMPILER arm-linux-gnueabihf-g++)
++set(CMAKE_C_COMPILER   /usr/bin/arm-linux-gnueabihf-gcc)
++set(CMAKE_CXX_COMPILER /usr/bin/arm-linux-gnueabihf-g++)
+ 
+-set(CMAKE_FIND_ROOT_PATH /usr/arm-linux-gnueabihf /usr/lib/arm-linux-gnueabihf)
++# Tell CMake the multiarch directory name so find_library works.
++set(CMAKE_LIBRARY_ARCHITECTURE arm-linux-gnueabihf)
++
++# CMAKE_FIND_ROOT_PATH plus the multiarch dir let find_library find Debian
++# armhf packages under /usr/lib/arm-linux-gnueabihf, headers under /usr/include.
++set(CMAKE_FIND_ROOT_PATH /usr/arm-linux-gnueabihf / /usr/lib/arm-linux-gnueabihf)
+ set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+ set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+ set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+ set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
+ 
+-# armhf pkg-config
+-set(ENV{PKG_CONFIG_PATH} "/usr/lib/arm-linux-gnueabihf/pkgconfig")
+-set(ENV{PKG_CONFIG_LIBDIR} "/usr/lib/arm-linux-gnueabihf/pkgconfig")
++set(ENV{PKG_CONFIG_PATH}   "/usr/lib/arm-linux-gnueabihf/pkgconfig")
++set(ENV{PKG_CONFIG_LIBDIR} "/usr/lib/arm-linux-gnueabihf/pkgconfig:/usr/share/pkgconfig")
++
++# Tells OAI's CMakeLists.txt to skip host CPU autodetection and pick the
++# armv7l -march flag instead of -march=native.
++set(CROSS_COMPILE 1)
++
++# OAI builds LDPC code generators that must run on the BUILD host (Jetson
++# aarch64). Their built location is passed via -DNATIVE_DIR=...; the variables
++# below point CMake at that location, mirroring cmake_targets/cross-arm.cmake.
++set(bnProc_gen_128_DIR    ${CMAKE_CURRENT_BINARY_DIR}/${NATIVE_DIR})
++set(bnProc_gen_avx2_DIR   ${CMAKE_CURRENT_BINARY_DIR}/${NATIVE_DIR})
++set(bnProc_gen_avx512_DIR ${CMAKE_CURRENT_BINARY_DIR}/${NATIVE_DIR})
++set(cnProc_gen_128_DIR    ${CMAKE_CURRENT_BINARY_DIR}/${NATIVE_DIR})
++set(cnProc_gen_avx2_DIR   ${CMAKE_CURRENT_BINARY_DIR}/${NATIVE_DIR})
++set(cnProc_gen_avx512_DIR ${CMAKE_CURRENT_BINARY_DIR}/${NATIVE_DIR})
++set(genids_DIR            ${CMAKE_CURRENT_BINARY_DIR}/${NATIVE_DIR})
++set(_check_vcd_DIR        ${CMAKE_CURRENT_BINARY_DIR}/${NATIVE_DIR})
+diff --git a/openair1/PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment/nrLDPC_coding_segment_encoder.c b/openair1/PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment/nrLDPC_coding_segment_encoder.c
+index c0cb6af49f..9119d9429f 100644
+--- a/openair1/PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment/nrLDPC_coding_segment_encoder.c
++++ b/openair1/PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment/nrLDPC_coding_segment_encoder.c
+@@ -108,7 +108,20 @@ static void write_task_output(uint8_t *f,
+     output_p++;
+   }
+ 
+-#elif defined(__aarch64__)
++#elif defined(__aarch64__) || (defined(__ARM_NEON) && defined(__arm__))
++  /* armv7 NEON (Cortex-A9) has all the intrinsics used here except vaddv_u8.
++   * Substitute with a pairwise-add reduction. */
++#ifdef __aarch64__
++  #define VADDV_U8(x) vaddv_u8(x)
++#else
++  #define VADDV_U8(x) ({ \
++    uint8x8_t _v = (x); \
++    uint16x4_t _a = vpaddl_u8(_v); \
++    uint32x2_t _b = vpaddl_u16(_a); \
++    (uint8_t)(vget_lane_u32(_b, 0) + vget_lane_u32(_b, 1)); \
++  })
++#endif
++
+   uint16_t *output_p = (uint16_t*)output;
+   const int8_t __attribute__ ((aligned (16))) ucShift[8][16] = {
+     {0,1,2,3,4,5,6,7,0,1,2,3,4,5,6,7},     // segment 0
+@@ -119,7 +132,7 @@ static void write_task_output(uint8_t *f,
+     {-5,-4,-3,-2,-1,0,1,2,-5,-4,-3,-2,-1,0,1,2}, // segment 5
+     {-6,-5,-4,-3,-2,-1,0,1,-6,-5,-4,-3,-2,-1,0,1}, // segment 6
+     {-7,-6,-5,-4,-3,-2,-1,0,-7,-6,-5,-4,-3,-2,-1,0}}; // segment 7
+-  const uint8_t __attribute__ ((aligned (16))) masks[16] = 
++  const uint8_t __attribute__ ((aligned (16))) masks[16] =
+       {0x1,0x2,0x4,0x8,0x10,0x20,0x40,0x80,0x1,0x2,0x4,0x8,0x10,0x20,0x40,0x80};
+   int8x16_t vshift[8];
+   for (int n=0;n<8;n++) vshift[n] = vld1q_s8(ucShift[n]);
+@@ -127,13 +140,13 @@ static void write_task_output(uint8_t *f,
+ 
+   for (int i=0;i<E2;i+=16) {
+     uint32_t Eoffset2 = Eoffset;
+-    if (i<E) {	
++    if (i<E) {
+       for (int j=0; j < E2_first_segment; j++) {
+         uint32_t Eoffset2_byte = Eoffset2 >> 4;
+         uint32_t Eoffset2_bit = Eoffset2 & 15;
+         uint8x16_t cshift = vandq_u8(vshlq_u8(((uint8x16_t*)f)[i >> 4],vshift[j]),vmask);
+-        int32_t tmp = (int)vaddv_u8(vget_low_u8(cshift));
+-        tmp += (int)(vaddv_u8(vget_high_u8(cshift))<<8);
++        int32_t tmp = (int)VADDV_U8(vget_low_u8(cshift));
++        tmp += (int)(VADDV_U8(vget_high_u8(cshift))<<8);
+         *(output_p + Eoffset2_byte)   |= (uint16_t)(tmp<<Eoffset2_bit);
+         *(output_p + Eoffset2_byte+1) |= (uint16_t)(tmp>>(16-Eoffset2_bit));
+         Eoffset2 += E;
+@@ -147,15 +160,16 @@ static void write_task_output(uint8_t *f,
+       uint32_t Eoffset2_byte = Eoffset2 >> 4;
+       uint32_t Eoffset2_bit = Eoffset2 & 15;
+       uint8x16_t cshift = vandq_u8(vshlq_u8(((uint8x16_t*)f2)[i >> 4],vshift[j]),vmask);
+-      int32_t tmp = (int)vaddv_u8(vget_low_u8(cshift));
+-      tmp += (int)(vaddv_u8(vget_high_u8(cshift))<<8);
++      int32_t tmp = (int)VADDV_U8(vget_low_u8(cshift));
++      tmp += (int)(VADDV_U8(vget_high_u8(cshift))<<8);
+       *(output_p + Eoffset2_byte)   |= (uint16_t)(tmp<<Eoffset2_bit);
+       *(output_p + Eoffset2_byte+1) |= (uint16_t)(tmp>>(16-Eoffset2_bit));
+       Eoffset2 += E2;
+     }
+     output_p++;
+   }
+-       
++  #undef VADDV_U8
++
+ #else
+   uint32_t *output_p = (uint32_t*)output;
+ 
+diff --git a/openair1/PHY/CODING/nrPolar_tools/nr_polar_defs.h b/openair1/PHY/CODING/nrPolar_tools/nr_polar_defs.h
+index 519f23175c..b98dfb1113 100644
+--- a/openair1/PHY/CODING/nrPolar_tools/nr_polar_defs.h
++++ b/openair1/PHY/CODING/nrPolar_tools/nr_polar_defs.h
+@@ -61,7 +61,15 @@ static const uint8_t nr_polar_subblock_interleaver_pattern[32] = {0,  1,  2,  4,
+ #define Nmax 1024
+ #define nmax 10
+ 
++#if defined(__SIZEOF_INT128__)
+ #define uint128_t __uint128_t
++#else
++/* 32-bit ARM (no compiler-provided 128-bit int). Polyfill as a struct so the
++ * type exists for declarations; ops are not defined. PHY (L1) callers that
++ * exercise it are stubbed elsewhere for armv7; this build target runs in
++ * VNF (L2/L3) mode where the type is referenced but never operated on. */
++typedef struct { uint64_t lo; uint64_t hi; } uint128_t;
++#endif
+ 
+ #define POLAR_OP_CODE_LEFT 0
+ #define POLAR_OP_CODE_RIGHT 1
+diff --git a/openair1/PHY/CODING/nrPolar_tools/nr_polar_encoder.c b/openair1/PHY/CODING/nrPolar_tools/nr_polar_encoder.c
+index 0f22900d72..21b3f6c514 100644
+--- a/openair1/PHY/CODING/nrPolar_tools/nr_polar_encoder.c
++++ b/openair1/PHY/CODING/nrPolar_tools/nr_polar_encoder.c
+@@ -292,6 +292,14 @@ __attribute__((always_inline)) static inline void polar_rate_matching(const t_nr
+ {
+   // handle rate matching with a single 128 bit word using bit shuffling
+   // can be done with SIMD intrisics if needed
++#if !defined(__SIZEOF_INT128__)
++  /* 32-bit targets (e.g. armv7) lack __uint128_t. This function is part of
++   * the L1 PHY (polar rate matching for PBCH/DCI/UCI). VNF mode (L2/L3 only,
++   * the use case for armv7 in this project) never calls into it. Provide a
++   * stub so the binary links — runtime use would abort. */
++  (void)polarParams; (void)in; (void)out;
++  AssertFatal(0, "polar_rate_matching: __uint128_t unavailable on this arch (VNF should not call this)\n");
++#else
+   if (polarParams->groupsize < 8) {
+     AssertFatal(polarParams->encoderLength <= 512,
+                 "Need to handle groupsize(%d)<8 and N(%d)>512\n",
+@@ -342,6 +350,7 @@ __attribute__((always_inline)) static inline void polar_rate_matching(const t_nr
+   if (polarParams->i_bil == 1) {
+     nr_polar_rm_interleaving_cb(out, out, polarParams->encoderLength);
+   }
++#endif /* __SIZEOF_INT128__ */
+ }
+ 
+ void build_polar_tables(t_nrPolar_params *polarParams)
+@@ -359,21 +368,24 @@ void build_polar_tables(t_nrPolar_params *polarParams)
+   for (int byte = 0; byte < numbytes; byte++) {
+     int numbits = byte < (polarParams->K >> 3) ? 8 : residue;
+     for (uint64_t val = 0; val < 256LU; val++) {
+-      // uint16_t * tmp=polarParams->deinterleaving_pattern+polarParams->K - 1 - 8 * byte;
+-      union {
+-        uint128_t full;
+-        uint64_t pieces[2];
+-      } tab = {0};
++      /* Two 64-bit pieces forming a 128-bit accumulator. Was previously a
++       * union with uint128_t; avoid that here so 32-bit ARM (no __uint128_t)
++       * can build this function (it is called during VNF setup). */
++      uint64_t piece0 = 0, piece1 = 0;
+       uint *tmp = deinterleaving_pattern + polarParams->K - 8 * byte - 1;
+       for (int i = 0; i < numbits; i++) {
+         // flip bit endian of B bitstring
+         const int ip = *tmp--;
+         AssertFatal(ip < 128, "ip = %d\n", ip);
+-        const uint128_t bit_i = (val >> i) & 1;
+-        tab.full |= bit_i << ip;
++        const uint64_t bit_i = (val >> i) & 1;
++        if (ip < 64) {
++          piece0 |= bit_i << ip;
++        } else {
++          piece1 |= bit_i << (ip - 64);
++        }
+       }
+-      polarParams->cprime_tab0[byte][val] = tab.pieces[0];
+-      polarParams->cprime_tab1[byte][val] = tab.pieces[1];
++      polarParams->cprime_tab0[byte][val] = piece0;
++      polarParams->cprime_tab1[byte][val] = piece1;
+     }
+   }
+ 
+@@ -565,6 +577,11 @@ void polar_encoder_fast(uint64_t *A,
+     else if (polarParams->crcParityBits == 11)
+       tcrc = (uint64_t)((crcmask ^ (crc11(A64_flip, bitlen) >> 21))) & 0x7ff;
+   } else if (bitlen <= 128) {
++#if !defined(__SIZEOF_INT128__)
++    /* 32-bit ARM: no __uint128_t. This 65..128-bit polar encode path is L1
++     * only and not reached by VNF mode. Abort if ever called. */
++    AssertFatal(0, "polar_encoder_fast bitlen<=128 path needs __uint128_t (VNF should not call)\n");
++#else
+     uint8_t A128_flip[16 + offset];
+     if (ones_flag) {
+       A128_flip[0] = 0xff;
+@@ -578,6 +595,7 @@ void polar_encoder_fast(uint64_t *A,
+       tcrc = (uint64_t)((crcmask ^ (crc24c(A128_flip, 8 * offset + bitlen) >> 8))) & 0xffffff;
+     else if (polarParams->crcParityBits == 11)
+       tcrc = (uint64_t)((crcmask ^ (crc11(A128_flip, bitlen) >> 21))) & 0x7ff;
++#endif
+   }
+ 
+   // this is number of quadwords in the bit string
+diff --git a/openair1/PHY/MODULATION/nr_modulation.c b/openair1/PHY/MODULATION/nr_modulation.c
+index 562c43895b..84c06c1894 100644
+--- a/openair1/PHY/MODULATION/nr_modulation.c
++++ b/openair1/PHY/MODULATION/nr_modulation.c
+@@ -755,11 +755,18 @@ static inline __attribute__((always_inline)) __m256i cmac_prec256(__m256i y, __m
+   return _mm256_adds_epi16(y, produ);
+ }
+ #endif
+-#ifdef __aarch64__
++#if defined(__aarch64__) || (defined(__ARM_NEON) && defined(__arm__))
+ static inline __attribute__((always_inline)) int16x8_t cmac0_prec128(int16x8_t x, int16x8_t wr, int16x8_t wi) {
+     //
++#ifdef __aarch64__
+     int16x8_t xr = vuzp1q_s16(x, x);  // even lanes
+     int16x8_t xi = vuzp2q_s16(x, x);  // odd  lanes
++#else
++    /* armv7 NEON: vuzpq returns a struct {even, odd} */
++    int16x8x2_t _uz = vuzpq_s16(x, x);
++    int16x8_t xr = _uz.val[0];
++    int16x8_t xi = _uz.val[1];
++#endif
+ #ifdef __ARM_FEATURE_QRDMX
+     // ARMv8.1-A: Use RDM instructions
+     // real = ar*br - ai*bi  (Q15 scaling via high-half doubling muls)
+@@ -958,7 +965,7 @@ void nr_layer_precoder_simd(const int n_layers,
+     memcpy(out, y_triv, sizeof(y_triv));
+   }
+ #endif
+-#ifdef __aarch64__
++#if defined(__aarch64__) || (defined(__ARM_NEON) && defined(__arm__))
+   load_consts(int16x8_t, vdupq_n_s16, 0);
+   if (n_layers == 1) {
+     for (; out < end; out += sizeof(int16x8_t) / sizeof(*out)) {
+diff --git a/openair1/PHY/NR_TRANSPORT/nr_ulsch_demodulation.c b/openair1/PHY/NR_TRANSPORT/nr_ulsch_demodulation.c
+index ba4d192629..5617ce48ad 100644
+--- a/openair1/PHY/NR_TRANSPORT/nr_ulsch_demodulation.c
++++ b/openair1/PHY/NR_TRANSPORT/nr_ulsch_demodulation.c
+@@ -326,6 +326,14 @@ static simde__m128i nr_ulsch_comp_muli_sum(simde__m128i input_x,
+                                            simde__m128i input_z,
+                                            simde__m128i det)
+ {
++#if defined(__arm__) && !defined(__aarch64__)
++  /* armv7 NEON: simde_mm_slli_epi32(v, n) for variable n maps to vshlq_n_s32
++   * which needs an immediate. This UL demodulation path is L1; VNF mode
++   * (the armv7 use case in this project) does not invoke it. Abort if called. */
++  (void)input_x; (void)input_y; (void)input_w; (void)input_z; (void)det;
++  AssertFatal(0, "nr_ulsch_comp_muli_sum: armv7 stub (VNF should not call)\n");
++  return simde_mm_setzero_si128();
++#else
+ 
+   // complex multiplication (x_re + jx_im)*(y_re + jy_im) = (x_re*y_re - x_im*y_im) + j(x_im*y_re + x_re*y_im)
+   // complex multiplication (w_re + jw_im)*(z_re + jz_im) = (w_re*z_re - w_im*z_im) + j(w_im*z_re + w_re*z_im)
+@@ -361,6 +369,7 @@ static simde__m128i nr_ulsch_comp_muli_sum(simde__m128i input_x,
+   simde__m128i output = oai_mm_pack(xy_re_128, xy_im_128);
+ 
+   return(output);
++#endif /* !(__arm__ && !__aarch64__) */
+ }
+ 
+ /* Zero Forcing Rx function: nr_construct_HhH_elements()
+@@ -486,6 +495,16 @@ static uint8_t nr_ulsch_mmse_2layers(int **rxdataF_comp,
+                                      int length,
+                                      uint32_t noise_var)
+ {
++#if defined(__arm__) && !defined(__aarch64__)
++  /* armv7 NEON: simde_mm_slli_epi32(v, var) maps to vshlq_n_s32 which needs
++   * an immediate. UL MMSE equalization is L1 only; VNF mode (the armv7 use
++   * case in this project) never invokes it. Abort if called. */
++  (void)rxdataF_comp; (void)buffer_length; (void)nb_rx_ant;
++  (void)ul_ch_mag; (void)ul_ch_magb; (void)ul_ch_magc; (void)ul_ch_estimates_ext;
++  (void)nb_rb; (void)mod_order; (void)shift; (void)symbol; (void)length; (void)noise_var;
++  AssertFatal(0, "nr_ulsch_mmse_2layers: armv7 stub (VNF should not call)\n");
++  return 0;
++#else
+   uint32_t nb_rb_0 = length/12 + ((length%12)?1:0);
+ 
+   /* we need at least alignment to 16 bytes, let's put 32 to be sure
+@@ -859,6 +878,7 @@ static uint8_t nr_ulsch_mmse_2layers(int **rxdataF_comp,
+     after_mf_d_128 += 1;
+   }
+    return(0);
++#endif /* !(__arm__ && !__aarch64__) */
+ }
+ 
+ static void inner_rx(PHY_VARS_gNB *gNB,

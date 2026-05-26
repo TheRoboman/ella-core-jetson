@@ -43,12 +43,27 @@ $CFG --file "$KBUILD_OUTPUT/.config" -e IP_NF_NAT
 $CFG --file "$KBUILD_OUTPUT/.config" -e IP_NF_TARGET_MASQUERADE
 $CFG --file "$KBUILD_OUTPUT/.config" -e NETFILTER_XT_MATCH_CONNTRACK
 
-# BPF / BTF
+# BPF / BTF (requires `pahole` from `dwarves` package at build time)
 $CFG --file "$KBUILD_OUTPUT/.config" -e BPF_SYSCALL
 $CFG --file "$KBUILD_OUTPUT/.config" -e BPF_JIT
 $CFG --file "$KBUILD_OUTPUT/.config" -e DEBUG_INFO
+$CFG --file "$KBUILD_OUTPUT/.config" -e DEBUG_INFO_DWARF5
 $CFG --file "$KBUILD_OUTPUT/.config" -e DEBUG_INFO_BTF
 $CFG --file "$KBUILD_OUTPUT/.config" -e TUN
+
+# Phase B (nFAPI L2/L3 on the board): tighter timing
+$CFG --file "$KBUILD_OUTPUT/.config" -d HZ_100
+$CFG --file "$KBUILD_OUTPUT/.config" -d HZ_PERIODIC
+$CFG --file "$KBUILD_OUTPUT/.config" -e HZ_1000
+$CFG --file "$KBUILD_OUTPUT/.config" --set-val HZ 1000
+$CFG --file "$KBUILD_OUTPUT/.config" -e NO_HZ_FULL
+$CFG --file "$KBUILD_OUTPUT/.config" -e NO_HZ_COMMON
+$CFG --file "$KBUILD_OUTPUT/.config" -e RCU_NOCB_CPU
+$CFG --file "$KBUILD_OUTPUT/.config" -e PREEMPT
+# CONFIG_PREEMPT_RT not available on ARM in kernel 6.1 (mainlined in 6.12+).
+# We rely on PREEMPT + isolcpus + SCHED_FIFO for OAI L2 timing.
+$CFG --file "$KBUILD_OUTPUT/.config" -e CPU_FREQ_DEFAULT_GOV_PERFORMANCE
+$CFG --file "$KBUILD_OUTPUT/.config" -d CPU_FREQ_DEFAULT_GOV_SCHEDUTIL
 
 make olddefconfig
 
