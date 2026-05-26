@@ -98,10 +98,69 @@ All from `cmake_targets/ran_build/build_armhf/` after `build-oai-armhf.sh`.
 - `sd-card/build-oai-armhf.sh` — two-stage build wrapper, idempotent (stage 1 cached)
 - `patches/oai-armhf.patch` — apply against a fresh OAI tree before building
 
+## Deployment Progress
+
+Configs created (`configs/`):
+- `gnb-vnf-adrv.conf`  — board-side VNF (L2+L3), adapted from
+  `gnb-vnf.sa.band78.106prb.nfapi.conf`. Only IP-address fields changed:
+  AMF and gNB IPs set to `169.254.237.42` (board), nFAPI south side
+  set to `169.254.237.1` (Jetson PNF).
+- `gnb-pnf-jetson.conf` — Jetson-side PNF (L1), adapted from
+  `gnb-pnf.band78.rfsim.conf`. nFAPI north side set to the board IP.
+
+Binary + runtime libs deployed to board at `/opt/oai/` (17 MB
+`nr-softmodem`, plus `libldpc.so`, `librfsimulator.so`, etc.).
+Required armhf runtime packages installed by side-loading via the
+Jetson: `libsctp1`, `libconfig9`, `libssl3`, `libblas3`, `liblapack3`,
+`liblapacke`, `libfftw3-{double,single}3`, `libnuma1`, `libcap2`,
+`libatomic1`, `libgfortran5`, `zlib1g`.
+
+### Runtime fix: cycle counter is privileged on Cortex-A9
+
+First run on the board exited with SIGILL. Faulting instruction (found
+via core dump + addr2line):
+
+```
+mrc p15, 0, r5, c9, c13, 0   // PMCCNTR — privileged in user mode
+```
+
+Source: `common/utils/time_meas.h`'s `__arm__` branch of `rdtsc_oai()`.
+On x86 OAI uses `rdtsc` (unprivileged); on aarch64 it uses `cntvct_el0`
+(also unprivileged). The armhf path went straight to PMCCNTR via CP15
+which requires kernel cooperation (setting `PMUSERENR.EN`) — by default
+SIGILL in user mode on ARMv7.
+
+Patch: replace the armhf `rdtsc_oai` with `clock_gettime(CLOCK_MONOTONIC)`.
+On Linux this is a VDSO call (no syscall overhead) and the result is in
+nanoseconds. `get_cpu_freq_GHz()` will then return ~1.0 (1 GHz "tick"
+equivalent) because diff over a 1s sleep is ~1e9.
+
+### Current blocker: NULL deref in MAC config
+
+After the timing patch, the VNF boot progresses much further: it now
+reads all the GNB_APP config (PDSCH/PUSCH antenna ports, RU stubs,
+HARQ counts, RedCap/PTRS absence, etc.) then SIGSEGVs in
+`get_scc_config()` at `openair2/GNB_APP/gnb_config.c:986` — the
+`LOG_I(RRC, "Read in ServingCellConfigCommon (PhysCellId %d, ABSFREQSSB %d, …"`
+line dereferences `scc->physCellId`, `frequencyInfoDL`, etc.
+
+Tested with `physCellId = 0` and `= 1` — same crash. The serving-cell-
+config parsing is reaching that LOG_I with a NULL pointer somewhere in
+the struct chain. Same config + same OAI tree works fine on x86_64, so
+this is armhf-specific. Open questions:
+- Is it a struct-alignment difference (32-bit vs 64-bit pointer layouts
+  inside the ASN.1-generated structures)?
+- Is the config parser silently producing a NULL where it should produce
+  a pointer-to-default-value?
+- Could it be a calloc that's failing silently — Cortex-A9 has 1GB RAM
+  and we have headroom, but worth confirming?
+
+Next debug step: add prints around line 986 to identify which field is
+NULL, then trace back where the config parser should have set it.
+
 ## What's Next
 
-1. Write VNF config (`gnb-vnf.sa.band78.106prb.nfapi.conf`-style) targeting the board's IP
-2. Write PNF config with rfsim radio targeting the Jetson, pointing at board's VNF IP
-3. Deploy `nr-softmodem` + libs to `/opt/oai/` on board, write a systemd unit
-4. Start VNF on board, PNF on Jetson, nrUE on Jetson — measure attach time
-5. Compare against Phase A: throughput, latency, CPU usage on board
+1. ⏳ Resolve `get_scc_config` NULL-deref (only blocker left)
+2. Configure systemd unit on board for `nr-softmodem --nfapi VNF`
+3. Configure PNF on Jetson, point at board, attempt nFAPI handshake
+4. Full UE attach via the split, compare metrics vs Phase A

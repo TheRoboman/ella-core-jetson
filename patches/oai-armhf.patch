@@ -44,6 +44,37 @@ index 3a75fbf853..5526ae7afc 100644
 +set(cnProc_gen_avx512_DIR ${CMAKE_CURRENT_BINARY_DIR}/${NATIVE_DIR})
 +set(genids_DIR            ${CMAKE_CURRENT_BINARY_DIR}/${NATIVE_DIR})
 +set(_check_vcd_DIR        ${CMAKE_CURRENT_BINARY_DIR}/${NATIVE_DIR})
+diff --git a/common/utils/time_meas.h b/common/utils/time_meas.h
+index de79a0252d..dfa26119d5 100644
+--- a/common/utils/time_meas.h
++++ b/common/utils/time_meas.h
+@@ -109,12 +109,20 @@ static inline uint64_t rdtsc_oai(void)
+ 	      return r;
+ }
+ 
+-#elif defined(__arm__) 
+-static inline uint32_t rdtsc_oai(void) __attribute__((always_inline));
+-static inline uint32_t rdtsc_oai(void) {
+-  uint32_t r = 0;
+-  asm volatile("mrc p15, 0, %0, c9, c13, 0" : "=r"(r) );
+-  return r;
++#elif defined(__arm__)
++/* On Cortex-A9 (ARMv7-A) the cycle counter (PMCCNTR via CP15 c9/c13) is
++ * privileged in user mode by default and causes SIGILL. Enabling user
++ * access would require a custom kernel module that writes PMUSERENR.
++ * Use CLOCK_MONOTONIC instead — accessed via VDSO on Linux so the call
++ * cost is comparable to a function call, and the result is in
++ * nanoseconds (1 GHz "tick" equivalent). get_cpu_freq_GHz() will then
++ * return ~1.0 because the diff over a 1s sleep is ~1e9. */
++#include <time.h>
++static inline uint64_t rdtsc_oai(void) __attribute__((always_inline));
++static inline uint64_t rdtsc_oai(void) {
++  struct timespec ts;
++  clock_gettime(CLOCK_MONOTONIC, &ts);
++  return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+ }
+ #endif
+ 
 diff --git a/openair1/PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment/nrLDPC_coding_segment_encoder.c b/openair1/PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment/nrLDPC_coding_segment_encoder.c
 index c0cb6af49f..9119d9429f 100644
 --- a/openair1/PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment/nrLDPC_coding_segment_encoder.c
