@@ -135,28 +135,77 @@ On Linux this is a VDSO call (no syscall overhead) and the result is in
 nanoseconds. `get_cpu_freq_GHz()` will then return ~1.0 (1 GHz "tick"
 equivalent) because diff over a 1s sleep is ~1e9.
 
-### Current blocker: NULL deref in MAC config
+### Current blocker: 32-bit ABI mismatch in OAI config system
 
-After the timing patch, the VNF boot progresses much further: it now
-reads all the GNB_APP config (PDSCH/PUSCH antenna ports, RU stubs,
-HARQ counts, RedCap/PTRS absence, etc.) then SIGSEGVs in
-`get_scc_config()` at `openair2/GNB_APP/gnb_config.c:986` — the
-`LOG_I(RRC, "Read in ServingCellConfigCommon (PhysCellId %d, ABSFREQSSB %d, …"`
-line dereferences `scc->physCellId`, `frequencyInfoDL`, etc.
+Root-caused by bisecting with `fprintf` debug:
 
-Tested with `physCellId = 0` and `= 1` — same crash. The serving-cell-
-config parsing is reaching that LOG_I with a NULL pointer somewhere in
-the struct chain. Same config + same OAI tree works fine on x86_64, so
-this is armhf-specific. Open questions:
-- Is it a struct-alignment difference (32-bit vs 64-bit pointer layouts
-  inside the ASN.1-generated structures)?
-- Is the config parser silently producing a NULL where it should produce
-  a pointer-to-default-value?
-- Could it be a calloc that's failing silently — Cortex-A9 has 1GB RAM
-  and we have headroom, but worth confirming?
+1. `prepare_scc()` correctly allocates `scc->...->scs_SpecificCarrierList`
+   and calls `asn1cSeqAdd()` to insert one element. State at exit:
+   `array=0x28cdbb8 count=1 size=4` — valid.
 
-Next debug step: add prints around line 986 to identify which field is
-NULL, then trace back where the config parser should have set it.
+2. `GET_PARAMS(SCCsParams, SCCPARAMS_DESC(scc), aprefix)` (line 970 of
+   `gnb_config.c`) **clobbers** `scs_SpecificCarrierList.list.array` to
+   `NULL` while leaving `.count = 1`. The subsequent
+   `array[0]->carrierBandwidth` deref segfaults at line ~1023.
+
+3. Root cause: `SCCPARAMS_DESC` uses `TYPE_INT64` (with `.i64ptr` and
+   `.defint64val`) for fields whose ASN.1-generated target type is
+   `long *`:
+
+   ```c
+   {"dl_carrierBandwidth", NULL, 0,
+    .i64ptr = &scc->...->scs_SpecificCarrierList.list.array[0]->carrierBandwidth,
+    .defint64val = 217, TYPE_INT64, 0}
+   ```
+
+   The libconfig handler writes 8 bytes:
+   ```c
+   *(cfgoptions[i].u64ptr) = (uint64_t)llu;
+   ```
+
+   On x86_64 / aarch64: `sizeof(long) == 8` → write fits the target.
+   On armv7 (armhf): `sizeof(long) == 4` → 4 bytes overflow into the
+   next heap allocation. Adjacent allocations corrupt various pointer
+   fields, including `scs_SpecificCarrierList.list.array`.
+
+4. Attempted workaround: snapshot the affected list `array`/`size`
+   fields before GET_PARAMS, restore them after. Did not fix the crash
+   because GET_PARAMS performs many such 4-byte overflows; corruption
+   spreads to other adjacent fields that we did not snapshot.
+
+### Why the fix is non-trivial
+
+Three potential fixes, in order of how invasive they are:
+
+A. **Patch the libconfig handler to do a 4-byte write conditionally.**
+   The handler only sees `.u64ptr` (`int64_t *`), with no information
+   about target size. We'd have to add a new TYPE marker (TYPE_LONG)
+   that means "write `sizeof(long)` bytes" and convert all the affected
+   descriptor entries. Cleanest, but many descriptor entries to convert.
+
+B. **Hack SCCPARAMS_DESC on armhf to use TYPE_INT (4-byte write).**
+   On 32-bit, `int` and `long` are both 4 bytes, so `iptr` writes to
+   `long *` are correct. On 64-bit this would NOT be correct (upper
+   4 bytes left as calloc-zero), but the macro is only used on the
+   target build. Could be wrapped in `#if __SIZEOF_LONG__ == 4`.
+
+C. **Rebuild the kernel/Linux for 64-bit (aarch64).** The Zynq-7035
+   does not support aarch64 — Cortex-A9 is armv7 only. Not an option.
+
+Option A is the right long-term fix; option B is the pragmatic
+short-term fix and is what we'll attempt next.
+
+### Other observations
+
+- The same problem will affect *every* TYPE_INT64 descriptor that
+  targets ASN.1 `long *`. There are dozens of these across OAI's
+  config descriptors (not just SCC). Each one is a potential corruption
+  source on armhf. The crash we hit is just the first to trigger.
+- This bug is dormant on x86_64/aarch64 (the only OAI-supported
+  platforms in practice) because `long == int64_t` there.
+- For a serious armhf port, the long-term fix in OAI's config system
+  is essential. For our prototype, we can patch only the SCC and PNF
+  paths needed for nFAPI.
 
 ## What's Next
 

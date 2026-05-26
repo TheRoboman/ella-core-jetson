@@ -333,3 +333,57 @@ index ba4d192629..5617ce48ad 100644
  }
  
  static void inner_rx(PHY_VARS_gNB *gNB,
+diff --git a/openair2/GNB_APP/gnb_config.c b/openair2/GNB_APP/gnb_config.c
+index f9e8261c0f..ff419befc3 100644
+--- a/openair2/GNB_APP/gnb_config.c
++++ b/openair2/GNB_APP/gnb_config.c
+@@ -160,7 +160,6 @@ void prepare_scc(NR_ServingCellConfigCommon_t *scc)
+   NR_FreqBandIndicatorNR_t *dl_frequencyBandList = calloc_or_fail(1, sizeof(*dl_frequencyBandList));
+   asn1cSeqAdd(&frequencyInfoDL->frequencyBandList.list, dl_frequencyBandList);
+   struct NR_SCS_SpecificCarrier *dl_scs_SpecificCarrierList = calloc_or_fail(1, sizeof(*dl_scs_SpecificCarrierList));
+-  asn1cSeqAdd(&frequencyInfoDL->scs_SpecificCarrierList.list, dl_scs_SpecificCarrierList);
+ 
+   INIT_SETUP_RELEASE(PDCCH_ConfigCommon, scc->downlinkConfigCommon->initialDownlinkBWP->pdcch_ConfigCommon);
+   NR_SetupRelease_PDCCH_ConfigCommon_t *pdcch_ConfigCommon = scc->downlinkConfigCommon->initialDownlinkBWP->pdcch_ConfigCommon;
+@@ -954,8 +953,41 @@ static NR_ServingCellConfigCommon_t *get_scc_config(configmodule_interface_t *cf
+ 
+   if (SCCsParamList.numelt > 0 || MsgASCCsParamList.numelt > 0) {
+     snprintf(aprefix, sizeof(aprefix), "%s.[%i].%s.[%i]", GNB_CONFIG_STRING_GNB_LIST, 0, GNB_CONFIG_STRING_SERVINGCELLCONFIGCOMMON, 0);
++#if defined(__arm__) && !defined(__aarch64__)
++    /* armhf workaround: TYPE_INT64 entries in SCCPARAMS_DESC write 8 bytes
++     * to `long *` targets. On 32-bit ARM `long` is 4 bytes, so each write
++     * overflows by 4 bytes into the next heap allocation. This corrupts
++     * adjacent list-state in scc->downlinkConfigCommon->frequencyInfoDL
++     * (the .array pointer becomes NULL while .count stays 1).
++     * Snapshot the affected list state, then restore it after GET_PARAMS. */
++    void **_dl_scs_arr_save = (void**)scc->downlinkConfigCommon->frequencyInfoDL->scs_SpecificCarrierList.list.array;
++    int    _dl_scs_size_save = scc->downlinkConfigCommon->frequencyInfoDL->scs_SpecificCarrierList.list.size;
++    void **_dl_band_arr_save = (void**)scc->downlinkConfigCommon->frequencyInfoDL->frequencyBandList.list.array;
++    int    _dl_band_size_save = scc->downlinkConfigCommon->frequencyInfoDL->frequencyBandList.list.size;
++    void **_ul_scs_arr_save = (void**)scc->uplinkConfigCommon->frequencyInfoUL->scs_SpecificCarrierList.list.array;
++    int    _ul_scs_size_save = scc->uplinkConfigCommon->frequencyInfoUL->scs_SpecificCarrierList.list.size;
++#endif
+     GET_PARAMS(SCCsParams, SCCPARAMS_DESC(scc), aprefix);
+     GET_PARAMS(MsgASCCsParams, MSGASCCPARAMS_DESC(scc), aprefix);
++#if defined(__arm__) && !defined(__aarch64__)
++    /* Restore any clobbered list arrays (see note above). */
++    {
++      struct NR_FrequencyInfoDL *_fid = scc->downlinkConfigCommon->frequencyInfoDL;
++      struct NR_FrequencyInfoUL *_fiu = scc->uplinkConfigCommon->frequencyInfoUL;
++      if (_fid->scs_SpecificCarrierList.list.array == NULL) {
++        _fid->scs_SpecificCarrierList.list.array = (struct NR_SCS_SpecificCarrier**)_dl_scs_arr_save;
++        _fid->scs_SpecificCarrierList.list.size = _dl_scs_size_save;
++      }
++      if (_fid->frequencyBandList.list.array == NULL) {
++        _fid->frequencyBandList.list.array = (NR_FreqBandIndicatorNR_t**)_dl_band_arr_save;
++        _fid->frequencyBandList.list.size = _dl_band_size_save;
++      }
++      if (_fiu->scs_SpecificCarrierList.list.array == NULL) {
++        _fiu->scs_SpecificCarrierList.list.array = (struct NR_SCS_SpecificCarrier**)_ul_scs_arr_save;
++        _fiu->scs_SpecificCarrierList.list.size = _ul_scs_size_save;
++      }
++    }
++#endif
+     // NR_TDD-UL-DL-ConfigCommon pattern2 (optional IE)
+     // fetch params
+     struct NR_TDD_UL_DL_Pattern p2;
