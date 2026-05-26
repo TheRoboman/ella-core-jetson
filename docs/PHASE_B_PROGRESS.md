@@ -380,3 +380,57 @@ UERadioCapabilityInfoIndication on armhf.
 2. Once that NGAP encode bug is fixed, NAS registration + PDU session
    establishment + ping should all flow.
 3. Performance comparison vs Phase A.
+
+---
+
+## 2026-05-26 update — NGAP encode bug fixed; full NAS registration works
+
+The crash on `UERadioCapabilityInfoIndication` was the AMF UE NGAP ID being
+*decoded* on receive as garbage on armhf — 12921636760462557187 instead of 4.
+
+Root cause: the gNB receives `AMF_UE_NGAP_ID` from the AMF in many NGAP
+messages (DownlinkNASTransport, InitialContextSetupRequest, …) and decodes
+it via `asn_INTEGER2ulong(&ie->value.choice.AMF_UE_NGAP_ID, &amf_ue_ngap_id)`
+where `amf_ue_ngap_id` is `uint64_t`. On armhf `unsigned long` is 4 bytes,
+so the decode wrote 4 bytes into a 64-bit local, leaving the upper 32 bits
+as stack garbage. The stored value was then re-encoded on a later message
+(UECapabilityInfoIndication), violated the ASN.1 `INTEGER (0..2^40-1)`
+constraint, and the encoder bailed.
+
+Fix: switch every `asn_INTEGER2ulong(... AMF_UE_NGAP_ID ...)` call to
+`asn_INTEGER2uint64` (12 sites across ngap_gNB_handlers.c, _nas_procedures.c,
+_mobility_management.c).
+
+Two other fixes were needed to get the chain re-running:
+
+- `nfapi_vnf.c` (pnf_nr_param_resp_cb): the PARAM_RESP loop allocated
+  `number_of_phys` PHYs but wrote each into `pnf->phys[0]`, so phy_id=2
+  ended up there while the MAC hardcodes phy_id=1 in DL_TTI_REQ → no PHY
+  found. Restricted to allocate exactly one phy + send number_phy_rf=1.
+- `common/utils/system.c:290`: `pthread_setname_np` can return ENOENT
+  on very short-lived helper threads (their /proc/.../comm vanished),
+  which made `AssertFatal` abort the gNB before it could send NAS to the
+  PNF. Downgraded to LOG_W.
+
+### Verified end-to-end with the split
+
+```
+[NGAP-DL-DBG] decoded amf_ue_ngap_id=4 raw_size=1     ← was huge garbage
+[NGAP-CAP-DBG] amf_ue=4 ran_ue=1 buf=… len=14 size=14
+[NR_RRC] Send message to sctp: NGAP_InitialContextSetupResponse
+[NAS]    Received Registration Accept with result 3GPP
+[NAS]    Send NAS_UPLINK_DATA_REQ message(RegistrationComplete)
+[NGAP]   PDUSESSIONSetup initiating message
+[NR_RRC] Added PDU Session 10, (total nb of sessions = 1)
+[NR_RRC] Bearer Context Setup: PDU Session ID=10, incoming TEID=0x1, Addr=169.254.237.42
+[NR_RRC] Added DRB 1 to established list (PDU Session ID=10, total DRBs = 1)
+```
+
+So we now have: PNF L1 (Jetson, aarch64) ↔ nFAPI ↔ VNF L2+L3 (board, armhf)
+↔ NGAP/SCTP ↔ Ella Core AMF/SMF/UPF (board), with full **NAS Registration
+Accept** and **PDU Session 10 + DRB 1 established**.
+
+What's left for a fully functional split: the `oaitun_ue1` device hasn't
+been created on the UE side yet (PDU Session Accept hasn't completed end
+to end). Probably one more downstream issue around RRC Reconfiguration or
+UL bearer setup — same pattern of investigation.
