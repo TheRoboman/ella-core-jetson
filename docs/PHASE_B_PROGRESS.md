@@ -434,3 +434,52 @@ What's left for a fully functional split: the `oaitun_ue1` device hasn't
 been created on the UE side yet (PDU Session Accept hasn't completed end
 to end). Probably one more downstream issue around RRC Reconfiguration or
 UL bearer setup — same pattern of investigation.
+
+---
+
+## 2026-05-26 update — Data-plane blocked on integrated CU-UP
+
+After the NGAP fix, UE goes all the way through NAS Registration Accept
+and the gNB receives PDUSessionResourceSetupRequest from Ella, but the
+chain stops at the integrated CU-UP. The last VNF log line is
+
+```
+[E1AP]   UE 1: add PDU session ID 10 (1 bearers)
+```
+
+…from `openair2/LAYER2/nr_pdcp/cucp_cuup_handler.c:187`. The next step
+in that function is `drb_gtpu_create()` (line 208) which opens an N3 GTP
+tunnel to Ella's UPF. After that the gNB doesn't produce any more output
+and the UE eventually loses sync (T310 expiry, then `RRC_CONNECTION_FAILURE`).
+The "unknown message type 84" the UE logs immediately before is just a
+Configuration Update Command (0x54) that OAI's UE NAS state machine doesn't
+implement a case for — informational only.
+
+This is a CU-UP/GTP-U issue, not an armhf-specific encoder issue. Either:
+
+- `drb_gtpu_create()` blocks because Ella's userspace UPF receives the
+  PFCP FAR but doesn't acknowledge in a way that lets the gNB proceed.
+- E1AP integrated (`assoc_id=-1`, CU and CU-UP in the same process) is
+  serializing a callback that deadlocks under armhf scheduling.
+
+### Other fixes landed in this round
+
+- `nfapi_vnf.c:pnf_nr_param_resp_cb`: idempotent guard so the PARAM_RESP
+  callback firing twice doesn't bump `next_phy_id` to 2 and break the
+  MAC's hardcoded `phy_id=1`.
+- `nfapi_vnf.c`: only allocate one phy regardless of `number_of_phys`
+  (was the same single-PHY-overwrite bug).
+- `common/utils/system.c:290`: pthread_setname_np ENOENT downgraded
+  from AssertFatal to LOG_W.
+- `openair3/NGAP/ngap_common.c`: AMBR decode (`uEAggregateMaximumBitRateUL/DL`)
+  switched to `asn_INTEGER2uint64` — `bitrate_t` is uint64 but the old
+  call only wrote 32 bits on armhf.
+
+### What's left for full data plane
+
+1. Instrument `drb_gtpu_create` to confirm where it stalls.
+2. Either: get the integrated CU-UP working, OR run CU-UP as a separate
+   process via the standard E1AP path (the architecture this code mostly
+   targets).
+3. Once GTP-U tunnel is up: `ip a show oaitun_ue1` should appear on the
+   UE side and ping over 10.45.0.x should work.
